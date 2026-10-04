@@ -12,6 +12,7 @@ import csv  # alleen voor duidelijkheid/consistentie met quoting-terminologie
 import os
 # Hergebruik schema + normalizers (schema-key resolver gebruikt path_finding met fallback)
 from check_format import organisatie_SCHEMA_BY_FILE, clean_row_for_file, resolve_schema_key
+from transaction_dedup import dedup_table_name
 
 from reading_difficult_json import iter_transaction_ids_from_Game_Transactions
 
@@ -281,7 +282,8 @@ def _is_organisatie_semicolon_format(input_csv: str) -> bool:
 
 
 def _clean_organisatie_passthrough(input_csv: str, cleaned_dir: str, *, chunksize: int = 200_000,
-                           logger=None, check_only: bool = False) -> dict:
+                           logger=None, check_only: bool = False,
+                           only_first_chunk: bool = False) -> dict:
     """Minimale cleaning voor het organisatie-relationele formaat.
 
     De organisatie-export is al schoon/relationeel/getypeerd, dus we slaan de oude CamelCase- en
@@ -295,12 +297,19 @@ def _clean_organisatie_passthrough(input_csv: str, cleaned_dir: str, *, chunksiz
         return {"file": raw_filename, "rows": 0, "mode": "organisatie_check_only"}
     Path(cleaned_dir).mkdir(parents=True, exist_ok=True)
     rows_total, first = 0, True
-    for chunk in pd.read_csv(input_csv, sep=";", decimal=",", na_values=["NULL"],
-                             keep_default_na=True, low_memory=False, chunksize=chunksize):
-        for c in chunk.select_dtypes(include="object").columns:
+    sep = ";" if _is_organisatie_semicolon_format(input_csv) else ","
+    header = pd.read_csv(input_csv, sep=sep, nrows=0)
+    # Identifiers are text, including purely numeric IDs with leading zeroes.
+    id_types = {c: str for c in header.columns if c.strip().lower().endswith("_id")}
+    for chunk in pd.read_csv(input_csv, sep=sep, decimal="," if sep == ";" else ".",
+                             dtype=id_types, na_values=["", "NULL", "null", "NaN", "nan", "N/A", "n/a", "None", "none"],
+                             keep_default_na=False, low_memory=False, chunksize=chunksize):
+        for c in chunk.select_dtypes(include=["object", "string"]).columns:
             chunk[c] = chunk[c].map(lambda x: x.strip() if isinstance(x, str) else x)
         chunk.to_csv(out_path, mode="w" if first else "a", header=first, index=False)
         first, rows_total = False, rows_total + len(chunk)
+        if only_first_chunk:
+            break
     if logger:
         logger.info(f"[CLEAN-organisatie] {raw_filename} → {out_path}  ({rows_total:,} rijen, pass-through)")
     else:
@@ -348,9 +357,13 @@ def clean_csv_streaming(input_csv: str | Path,
     raw_filename = Path(input_csv).name
 
     # ► organisatie-export (relationeel, ;-gescheiden): route langs de oude schema-machine heen.
-    if _is_organisatie_semicolon_format(input_csv):
+    if _is_organisatie_semicolon_format(input_csv) or (
+        dedup_table_name(raw_filename)
+        and not resolve_schema_key(raw_filename, organisatie_SCHEMA_BY_FILE.keys())[0]
+    ):
         return _clean_organisatie_passthrough(input_csv, cleaned_dir, chunksize=chunksize,
-                                      logger=logger, check_only=check_only)
+                                      logger=logger, check_only=check_only,
+                                      only_first_chunk=only_first_chunk)
 
     # ► Bepaal schema-key via path_finding (met fallback) en haal schema op
     schema_key, chunk_suffix = resolve_schema_key(raw_filename, organisatie_SCHEMA_BY_FILE.keys())
@@ -747,4 +760,3 @@ def clean_csv_streaming(input_csv: str | Path,
         "input_mb": bytes_in/1_048_576,
         "warnings": warns_total
     }
-

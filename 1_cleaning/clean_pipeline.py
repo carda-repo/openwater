@@ -21,8 +21,8 @@ Verschillen met het Snellius-origineel
   scenario/feature-keuze is er geen subset om op te beperken.
 - Eén Python-aanroep `clean_directory(...)` doet de hele map; geen env-variabelen nodig.
 
-De eigenlijke regel-voor-regel schoonmaak (`clean_csv_streaming`) en de labelling
-(`label_outliers`) zijn ongewijzigd overgenomen in `cleaner.py` resp. `outlier_labeling.py`.
+De regel-voor-regel schoonmaak zit in `cleaner.py`, de transactie-deduplicatie in
+`transaction_dedup.py` en de labelling in `outlier_labeling.py`.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ import sys
 from cleaner import clean_csv_streaming, _is_organisatie_semicolon_format
 from check_format import resolve_schema_key, organisatie_SCHEMA_BY_FILE
 from outlier_labeling import label_outliers
+from transaction_dedup import deduplicate_transactions, deduplicate_bet_parts, dedup_table_name
 
 # Herkent `cleaned_YYYYmmdd_HHMMSS` (en TEST_cleaned_...) mapnamen — overgenomen uit
 # clean_and_parse.py, gebruikt om de nieuwste cleaned-map automatisch te kiezen.
@@ -101,7 +102,9 @@ def clean_directory(
 ) -> Path:
     """
     Schoon alle WOK-CSV's in `input_dir` en schrijf ze naar een nieuwe
-    `cleaned_<timestamp>/` map. Daarna (optioneel) automatische outlier-labelling.
+    `cleaned_<timestamp>/` map. Bewaar daarna de nieuwste rij per speler/transactie
+    in de drie transactietabellen en de nieuwste bet-part per weddenschap/part-ID;
+    vervolgens (optioneel) outlier-labelling.
 
     Parameters
     ----------
@@ -136,7 +139,7 @@ def clean_directory(
         skey, chunk_suffix = resolve_schema_key(p.name, organisatie_SCHEMA_BY_FILE.keys())
         # organisatie-relationele export (;-gescheiden) heeft géén oud schema, maar moet wél mee — die
         # tabellen (WOK_Bet_Parts, WOK_Bet_Transaction, WOK_Player_Limits_*, …) zijn nodig downstream.
-        if not skey and not _is_organisatie_semicolon_format(str(p)):
+        if not skey and not dedup_table_name(p.name) and not _is_organisatie_semicolon_format(str(p)):
             if verbose:
                 print(f"  ⏭️  Onbekend schema, overslaan: {p.name}")
             continue
@@ -184,7 +187,15 @@ def clean_directory(
         finally:
             _teardown_file_logger(logger)   # sluit het logbestand -> geen fd-lek over 300+ CSV's
 
-    # 4) Automatische outlier-labelling (net als clean_all in het origineel).
+    # 4) Nieuwste transacties en bet-parts, over chunks én CSV-delen.
+    logger = _setup_file_logger(logs_dir / "transaction_dedup.log")
+    try:
+        deduplicate_transactions(cleaned_dir, chunksize=chunksize, logger=logger)
+        deduplicate_bet_parts(cleaned_dir, chunksize=chunksize, logger=logger)
+    finally:
+        _teardown_file_logger(logger)
+
+    # 5) Automatische outlier-labelling (net als clean_all in het origineel).
     if do_label:
         print(f"\n🏷️  Start outlier-labelling op: {cleaned_dir}")
         label_outliers(str(cleaned_dir), verbose=verbose)
