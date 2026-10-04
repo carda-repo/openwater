@@ -107,6 +107,8 @@ def load_tables_local(
     STREAMING VERSION (paths only):
     Discover CSV files for each logical table and return a dict:
         { logical_table: [Path(...), Path(...), ...] }
+    plus missing flags for requested WOK_Game_Session, WOK_Bet and WOK_Complaint
+    tables. verbose controls diagnostic output only.
     """
     base_dir = Path(base_dir)
     files = sorted(base_dir.rglob(glob_pattern) if recursive else base_dir.glob(glob_pattern), key=_natural_sort_key)
@@ -143,9 +145,10 @@ def load_tables_local(
         canon = lt_ci.get(tbl.lower())
         if canon:
             buckets.setdefault(canon, []).append(f)
-    wok_game_session_missing = False
-    wok_bet_missing = False
-    wok_complaint_missing = False
+    missing_tables = set(lt_ci) - {table.lower() for table in buckets}
+    wok_game_session_missing = "wok_game_session" in missing_tables
+    wok_bet_missing = "wok_bet" in missing_tables
+    wok_complaint_missing = "wok_complaint" in missing_tables
     if verbose:
         print("\n🧺 Buckets formed for requested tables (paths only):")
         for t in logical_tables:
@@ -153,15 +156,8 @@ def load_tables_local(
             print(f"  - {t}: {len(paths)} file(s)")
             if not paths:
                 print("    ⚠️ No matching files for this table. Check naming (WOK_*), underscores/spaces, or subfolders.")
-                if t == "WOK_Game_Session":
+                if t.lower() in ("wok_game_session", "wok_bet", "wok_complaint"):
                     print("      (Hint: This table is optional; if absent, features depending on it will be skipped.)")
-                    wok_game_session_missing = True
-                if t == "WOK_Bet":
-                    print("      (Hint: This table is optional; if absent, features depending on it will be skipped.)")
-                    wok_bet_missing = True
-                if t == "WOK_Complaint":
-                    print("      (Hint: This table is optional; if absent, features depending on it will be skipped.)")
-                    wok_complaint_missing = True
             else:
                 for p in paths:
                     try:
