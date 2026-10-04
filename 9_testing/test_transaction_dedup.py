@@ -168,7 +168,7 @@ def test_pipeline_deduplicates_three_tables_before_labelling(tmp_path, monkeypat
             _row(tx_col, "old", "2026-01-01", player="NA"),
             _row(tx_col, "different", "2026-01-02", tx="0002"),
         ], sep=";")
-    _write(raw / "WOK_Bet_Parts.csv", [{"pk_id": "part-1", "part_id": "0001"}], sep=";")
+    _write(raw / "WOK_Bet_Parts.csv", [{"pk_id": "part-1", "wok_bet_pk_id": "bet-1", "part_id": "0001"}], sep=";")
     original = {p: p.read_bytes() for p in raw.glob("*.csv")}
     labelled = []
 
@@ -183,7 +183,7 @@ def test_pipeline_deduplicates_three_tables_before_labelling(tmp_path, monkeypat
     cleaned = clean_directory(raw, tmp_path / "output", chunksize=1)
     assert labelled == [str(cleaned)]
     assert all(p.read_bytes() == content for p, content in original.items())
-    assert _rows(cleaned / "WOK_Bet_Parts.csv") == [{"pk_id": "part-1", "part_id": "0001"}]
+    assert _rows(cleaned / "WOK_Bet_Parts.csv") == [{"pk_id": "part-1", "wok_bet_pk_id": "bet-1", "part_id": "0001"}]
     log = (raw / "logs" / "transaction_dedup.log").read_text()
     assert all(table in log for table, _ in TABLES)
 

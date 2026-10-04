@@ -12,7 +12,7 @@ import csv  # alleen voor duidelijkheid/consistentie met quoting-terminologie
 import os
 # Hergebruik schema + normalizers (schema-key resolver gebruikt path_finding met fallback)
 from check_format import organisatie_SCHEMA_BY_FILE, clean_row_for_file, resolve_schema_key
-from transaction_dedup import transaction_table_name
+from transaction_dedup import dedup_table_name
 
 from reading_difficult_json import iter_transaction_ids_from_Game_Transactions
 
@@ -358,7 +358,7 @@ def clean_csv_streaming(input_csv: str | Path,
 
     # ► organisatie-export (relationeel, ;-gescheiden): route langs de oude schema-machine heen.
     if _is_organisatie_semicolon_format(input_csv) or (
-        transaction_table_name(raw_filename)
+        dedup_table_name(raw_filename)
         and not resolve_schema_key(raw_filename, organisatie_SCHEMA_BY_FILE.keys())[0]
     ):
         return _clean_organisatie_passthrough(input_csv, cleaned_dir, chunksize=chunksize,

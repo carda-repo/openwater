@@ -184,6 +184,9 @@ information, the input directory defines the operator scope. Account rows are ra
 `_write_timestamp`, then `extraction_date`. Missing timestamps fall back to the next available
 field; ties or entirely missing timestamps keep the last row read (files in natural filename
 order, then row order). IDs remain text; rows without a player or transaction ID remain separate.
+`WOK_Bet_Parts` is also deduplicated: keep the newest row per operator and combination of
+`wok_bet_pk_id` and `part_id`, ordered by `created_at`, `_write_timestamp`, then `extraction_date`.
+The same part ID in different bets remains separate; rows with incomplete keys are kept.
 The SQLite index uses disk storage, and counts are written to `logs/transaction_dedup.log` beside
 the raw input. Afterwards the **outlier labelling**
 runs automatically, adding the columns `outlier_Registration_Date` and
@@ -199,7 +202,7 @@ already-cleaned folder) — that is the pure-Python equivalent of the original `
 | [run_cleaning.py](1_cleaning/run_cleaning.py) | Runner: clean a folder + automatic labelling. Replaces `run_ALL_clean_only.sbatch` → `clean_runner.py`. |
 | [run_label_only.py](1_cleaning/run_label_only.py) | Runner: **only** labelling on an existing `cleaned_<stamp>/` folder. Replaces `run_ALL_label_only.sbatch` → `label_runner.py`. |
 | [clean_pipeline.py](1_cleaning/clean_pipeline.py) | Orchestration (`clean_directory`, `label_only_directory`, `newest_cleaned_dir`). Stripped-down `clean_and_parse.py` — clean+label only, no feature parse. |
-| [transaction_dedup.py](1_cleaning/transaction_dedup.py) | Keep the latest transaction per operator/player/ID across CSV parts, before labelling. |
+| [transaction_dedup.py](1_cleaning/transaction_dedup.py) | Keep the latest transactions and bet-parts across CSV parts, before labelling. |
 | `cleaner.py`, `check_format.py`, `operator_filters.py`, `outlier_labeling.py`, `reading_difficult_json.py`, `path_finding.py` | Cleaning, validation, filters, labelling and readers based on the main repo. |
 
 ### Usage — cleaning
@@ -911,7 +914,11 @@ operator-scope. Accounttransacties worden geordend op `extraction_date`, `_write
 Ontbreekt een tijdstempel, dan gebruiken we het volgende beschikbare veld. Bij gelijke of geheel
 ontbrekende tijdstempels blijft de laatst gelezen rij staan (natuurlijke bestandsnaamvolgorde,
 daarna rijvolgorde). ID's blijven tekst; rijen zonder speler- of transactie-ID blijven afzonderlijk
-behouden. De SQLite-index gebruikt schijfopslag; de aantallen staan in `logs/transaction_dedup.log`
+behouden. Ook `WOK_Bet_Parts` wordt gededupliceerd: de nieuwste rij per operator en combinatie van
+`wok_bet_pk_id` en `part_id` blijft staan, geordend op `created_at`, `_write_timestamp`, dan
+`extraction_date`. Dezelfde part-ID bij verschillende weddenschappen blijft afzonderlijk;
+rijen met onvolledige sleutels blijven behouden.
+De SQLite-index gebruikt schijfopslag; de aantallen staan in `logs/transaction_dedup.log`
 bij de ruwe input. Vervolgens draait automatisch de **outlier-labelling**, die op het
 `WOK_Player_Profile`-bestand de kolommen `outlier_Registration_Date` en
 `outlier_Player_Profile_Modified` toevoegt.
@@ -927,7 +934,7 @@ herhalen op een al-geschoonde map) — dat is het pure-Python equivalent van het
 | [run_cleaning.py](1_cleaning/run_cleaning.py) | Runner: schoon een map + automatische labelling. Vervangt `run_ALL_clean_only.sbatch` → `clean_runner.py`. |
 | [run_label_only.py](1_cleaning/run_label_only.py) | Runner: **alleen** labelling op een bestaande `cleaned_<stamp>/` map. Vervangt `run_ALL_label_only.sbatch` → `label_runner.py`. |
 | [clean_pipeline.py](1_cleaning/clean_pipeline.py) | Orkestratie (`clean_directory`, `label_only_directory`, `newest_cleaned_dir`). Uitgeklede `clean_and_parse.py` — alleen clean+label, geen feature-parse. |
-| [transaction_dedup.py](1_cleaning/transaction_dedup.py) | Nieuwste transactie per operator/speler/ID bewaren over CSV-delen, vóór labelling. |
+| [transaction_dedup.py](1_cleaning/transaction_dedup.py) | Nieuwste transacties en bet-parts bewaren over CSV-delen, vóór labelling. |
 | `cleaner.py`, `check_format.py`, `operator_filters.py`, `outlier_labeling.py`, `reading_difficult_json.py`, `path_finding.py` | Cleaning, validatie, filters, labelling en readers gebaseerd op de hoofdrepo. |
 
 ### Gebruik — cleaning
