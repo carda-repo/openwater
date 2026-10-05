@@ -216,6 +216,14 @@ poetry run python run_pipeline.py --help
   It requires complete, deduplicated movements between the snapshot and the start; the
   snapshot timestamp is `Extraction_Date`, and transactions at that timestamp follow it.
   Without a usable snapshot the features stay missing, including in the output CSV.
+- **Void rules for F44/F45/F48/F51**: F44/F45 use stakes net of successful
+  `VOID_BET`/`VOID_STAKE` refunds, allocated proportionally to the linked bet/session's
+  original stakes and placement hours. Refunds after the exclusive window end are ignored.
+  Their chunked calculation is shared per window; reference maps and aggregate sums remain
+  in memory. Missing refund links or zero net stakes produce missing shares. F48 excludes
+  cancelled bets and bets with successful `VOID_BET` from both counts. F51 includes intervals
+  with `VOID_BET`; successful wins/cash-outs still exclude an interval. F51 remains a
+  stake-to-stake timing proxy. Undefined results stay missing in the output CSV.
 
 ---
 
@@ -478,6 +486,15 @@ poetry run python run_pipeline.py --help
   moeten volledig en gededupliceerd zijn. Het saldotijdstip is `Extraction_Date`; transacties
   exact op dat tijdstip volgen op het saldo. Zonder bruikbaar saldo blijven de features
   onbekend, ook in het uiteindelijke CSV-bestand.
+- **Voidregels voor F44/F45/F48/F51**: F44/F45 verrekenen succesvolle
+  `VOID_BET`/`VOID_STAKE` naar verhouding met de oorspronkelijke inzetten van de gekoppelde
+  weddenschap/spelsessie en hun inzettijdstippen. Terugbetalingen na de exclusieve einddatum
+  tellen niet mee. De chunkgewijze berekening wordt per venster gedeeld; koppelingsindexen en
+  sommen blijven in het geheugen. Ontbrekende terugbetalingskoppelingen of netto-inzet nul
+  geven een onbekend aandeel. F48 sluit geannuleerde bets en bets met succesvolle `VOID_BET`
+  uit van teller en noemer. F51 telt intervallen met `VOID_BET` mee; succesvolle prijzen en
+  cash-outs sluiten een interval nog steeds uit. F51 meet nog steeds van inzet tot volgende
+  inzet. Niet-berekenbare uitkomsten blijven onbekend in het uiteindelijke CSV-bestand.
 
 ---
 

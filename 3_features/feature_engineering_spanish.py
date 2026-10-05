@@ -204,7 +204,7 @@ Risk Behaviors (Chasing Losses/Wins)
   • Balance Drop Events (F26) – Count how many times the player’s account balance fell from above €2 to below €2 during the period. To calculate, reconstruct the account balance chronologically using all transactions. Identify instances where, after a bet or other debit, the balance goes below €2 when it was ≥ €2 before. Count each such threshold-crossing event.
   • Deposits After Low Balance (F27) – Count how many times the player made a deposit shortly after depleting their balance below €2. For each event identified in F26 (balance < €2), check if the player’s next transaction was a deposit. Count the number of deposits that were preceded by a sub-€2 balance event. Divide by F1 to normalize per day. (If the player never dropped below €2, this can be “NA”.)
   • Time to Replenish Low Balance (F28) – Measure the median time (in seconds) it takes for the player to deposit after their balance falls below €2. For each balance drop event (from F26), calculate the time difference until the next deposit transaction. Then take the median of these intervals. (If no deposits followed low-balance events, output NA.)
-  • Quick Re-Bet After Loss (F51) – Calculate the typical time the player waits after losing a bet before placing a new bet. For each resolved bet that returned no winnings (a loss), find the timestamp of the next bet placement. Compute all such intervals and take the median (in seconds). (Requires identifying lost bets: e.g. a bet with a STAKE but no corresponding WINNING transaction; assume WOK_Bet can indicate when a bet is settled and whether it was lost.)
+  • Quick Re-Bet After Loss (F51) – Calculate the typical time the player waits after losing a bet before placing a new bet. The implementation measures consecutive successful STAKE intervals without an intervening successful WINNING or CASH_OUT; VOID_BET does not exclude an interval under the project definition. Take their median in seconds. This remains a stake-to-stake proxy, rather than timing from bet resolution.
   • Larger Bets After Big Win (F52) – Count instances of the player substantially increasing their stake sizes following a major win. To do this, scan the sequence of bets: whenever the player receives a large win (significant payout), compare the average stake of the next ~10 bets to the average stake of the previous ~10 bets. If the post-win average bet size is at least double the pre-win average, count this as an occurrence. (Use at least 5 bets before/after if 10 are not available. If fewer than 5 prior or subsequent bets, that win is not evaluated.) Sum all such occurrences in the period.
 
 Game Preferences & Diversity
@@ -227,8 +227,8 @@ Time-of-Day Play Patterns
   • Heavy-Play Hours Count (F41) – Identify the number of different hour-of-day slots in which the player concentrated their activity. For each hour of the day (00:00–00:59, 1:00–1:59, … 23:00–23:59), calculate the total number of interactions (bets or session starts) that occurred in that hour across the entire period. Determine which hours account for at least 2.083% of the player’s total interactions (2.083% = 1/48, representing a notable concentration of activity in that hour). Count how many distinct hours meet or exceed this threshold. (Result is between 0 and 24.)
   • Morning Interaction % (F42) – Calculate the proportion of the player’s interactions that occur during the morning/early afternoon window (08:00:00–15:59:59). Count all interactions (bets placed or sessions started) within that daily time block and divide by the total number of interactions in the period. Output is a fraction between 0 and 1 (or 0 if no play in that window).
   • Evening Interaction % (F43) – Calculate the proportion of interactions that occur in the late afternoon/evening window (16:00:00–23:59:59). Similarly, count interactions in that time range and divide by total interactions.
-  • Morning Stakes % (F44) – Calculate the share of money wagered in the morning window. Sum all stake amounts (Transaction_Type = STAKE in WOK_Player_Account_Transaction) for bets placed between 08:00 and 15:59, and divide by the total amount staked (sum of all STAKE transactions) in the period. Result is a fraction 0–1.
-  • Evening Stakes % (F45) – Calculate the share of money wagered in the evening window (16:00–23:59). Sum all stake amounts for interactions in that time frame and divide by total stakes.
+  • Morning Stakes % (F44) – Calculate the share of money wagered in the morning window. Use successful stakes net of linked VOID_BET/VOID_STAKE refunds, attributed proportionally to their original placement hours; divide the 08:00–15:59 amount by total net stakes. Result is a fraction 0–1.
+  • Evening Stakes % (F45) – Calculate the share of money wagered in the evening window (16:00–23:59). Sum net stakes after linked void refunds, allocated to original placement hours, and divide by total net stakes.
 
 Session & Duration Metrics
   • Sessions per Day (F29) – Compute the average number of casino game sessions per day. Count the total number of WOK_Game_Session records for the player in the period (each session of a slot, roulette, blackjack, etc. is one count). Divide this count by F1 (days active). (If the player had no game sessions, this can be 0.)
@@ -238,7 +238,7 @@ Session & Duration Metrics
   • Median Session Length (F47) – Compute the median duration of game sessions. Use WOK_Game_Session start and end times to find the length of each session (in seconds). Then take the median of all session lengths. (If the player had no game sessions, this can be NA.)
 
 Betting Behavior & Features
-  • Cash-Out Usage % (F48) – Calculate the percentage of bets that the player cashed out early. Use WOK_Player_Account_Transaction to identify cash-out events (Transaction_Type = CASH_OUT). Count the number of distinct bets that had a cash-out, and divide by the total number of bets placed (WOK_Bet count). (If multiple partial cashouts on one bet are possible, ensure each bet is only counted once.)
+  • Cash-Out Usage % (F48) – Calculate the percentage of bets that the player cashed out early. Use WOK_Player_Account_Transaction to identify cash-out events (Transaction_Type = CASH_OUT). Count the number of distinct bets that had a cash-out, and divide by the total number of non-void bets placed. Cancelled bets and bets with successful VOID_BET are excluded from both counts. (If multiple partial cashouts on one bet are possible, ensure each bet is only counted once.)
   • Live Bet % (F49) - Percentage of bets that were placed live (in-play). This would require knowing for each bet whether it was placed after the game/event started. The CDB does not explicitly flag in-play bets or provide event start times, so determining this from the data is not reliable.
   • Single Bet % (F50) – Determine the share of bets that were single bets (vs combination/multiple bets). Use the bet type field in WOK_Bet (Bet_Type) – count bets labeled as SINGLE and divide by the total number of bets. Output is a fraction (0–1). This could also be done with the bet_type field if it indicates single vs. combination bets.
   • Bet Odds Variability (F61) – Measure the variation in odds of the player’s bets. For all sports bets in the period, take the odds (quotation) of each bet (e.g. Part_Odds in WOK_Bet). Compute the coefficient of variation of these odds (standard deviation / mean of odds). (If the player made no bets, or if odds data is unavailable, this can be NA.)
@@ -284,6 +284,7 @@ import pandas as pd
 import numpy as np
 from path_finding import iter_csv_chunks
 from balance_reconstruction import reconstruct_start_balances
+from stake_time_shares import net_stake_time_shares
 from reading_difficult_json import simple_Player_Profile_Bank_Account_json_iterator, simple_RG_Class_Value_from_FLAG_RG_CLASS_json_iterator 
 from mapping_helpers import build_txid_to_player_map_ram, haal_uit_bank_json_iterator
 from reading_difficult_json import iter_limit_values, iter_transaction_ids_from_Game_Transactions, iter_part_ids_from_Bet_Parts, iter_player_profile_ids_from_Bet_Transactions, iter_transaction_ids_from_Bet_Transactions, get_list_of_response_ids_from_Responses_list, iter_part_live_flags_from_Bet_Parts, _safe_load_json_relaxed
@@ -6006,116 +6007,23 @@ def f44_morning_stakes_percentage(
     chunksize: int = 200_000,
     log_path: Path | None = None,
     verbose: bool = False,
+    stake_shares: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
+    """F44: net stake share at 08:00–15:59 UTC, after successful void refunds.
+
+    Refunds are allocated proportionally to their linked bet/session's original
+    stakes, not to the refund hour. Unknown links or zero net stakes yield NaN.
+    The analysis window remains [start, end); refunds after end are not used.
     """
-    F44 (spec):
-    Share (0..1) of amounts wagered (stakes) during the specified period that occur in:
-      08:00:00 to 15:59:59  =>  8 <= hour < 16
-
-    Uses WOK_Player_Account_Transaction:
-      - Transaction_Type == "STAKE"
-      - Transaction_Status == "SUCCESSFUL"
-      - amount aggregated as abs(Transaction_Amount)
-
-    Output:
-      - f44_morning_stakes_percentage: float in [0,1], NaN if total stake == 0
-    """
-    if log_path:
-        logger = _setup_feature_logger(log_path, "f44_morning_stakes_percentage")
-        logger.info("▶ START F44: Morning stakes share (08:00-15:59)")
-        if x_tijdspad:
-            logger.info(f"  Tijdsfiltering: {x_tijdspad[0]} - {x_tijdspad[1]} (no +1 logic)")
-    else:
-        logger = None
-
-    if x_tijdspad:
-        start_datum = parse_ddmmyyyy_to_timestamp(x_tijdspad[0])
-        eind_datum  = parse_ddmmyyyy_to_timestamp(x_tijdspad[1])
-    else:
-        start_datum = None
-        eind_datum  = None
-
-    txn_paths = tables.get("WOK_Player_Account_Transaction") or []
-    if not txn_paths:
-        return pd.DataFrame(columns=["Player_Profile_ID", "f44_morning_stakes_percentage"])
-
-    total_stake: Dict[str, float] = {}
-    morning_stake: Dict[str, float] = {}
-
-    coerced_stake_warned = False
-
-    for df in iter_csv_chunks(
-        paths=txn_paths,
-        usecols=[
-            "Player_Profile_ID",
-            "Transaction_Amount",
-            "Transaction_Datetime",
-            "Transaction_Type",
-            "Transaction_Status",
-        ],
-        chunksize=chunksize,
-        verbose=verbose,
-    ):
-        df = df[df["Player_Profile_ID"].notna()].copy()
-        if df.empty:
-            continue
-
-        # timestamps
-        ts = pd.to_datetime(df["Transaction_Datetime"], errors="coerce", utc=True).dt.tz_localize(None)
-        df = df[ts.notna()].copy()
-        if df.empty:
-            continue
-        df["ts"] = ts[ts.notna()].values
-
-        if start_datum is not None:
-            m = (df["ts"] >= start_datum) & (df["ts"] < eind_datum)
-            if not m.any():
-                continue
-            df = df.loc[m].copy()
-
-        # filter successful stakes
-        typ = df["Transaction_Type"].fillna("").astype(str).str.upper()
-        st  = df["Transaction_Status"].fillna("").astype(str).str.upper()
-        df = df[(typ == "STAKE") & (st == "SUCCESSFUL")].copy()
-        if df.empty:
-            continue
-
-        df["amount"] = pd.to_numeric(df["Transaction_Amount"], errors="coerce")
-        df = df[df["amount"].notna()].copy()
-        if df.empty:
-            continue
-
-        # enforce STAKE negative if someone encoded it positive
-        to_flip = df["amount"] > 0
-        if to_flip.any():
-            df.loc[to_flip, "amount"] = -df.loc[to_flip, "amount"]
-            if logger and (not coerced_stake_warned):
-                logger.warning("⚠️ Coerced positive STAKE amounts to negative (one-time warning).")
-            coerced_stake_warned = True
-
-        df["hour"] = df["ts"].dt.hour.astype("int16")
-        is_morning = (df["hour"] >= 8) & (df["hour"] < 16)
-
-        # aggregate
-        for pid, amt, morn in zip(df["Player_Profile_ID"].astype(str), df["amount"].astype(float), is_morning.to_numpy()):
-            a = abs(amt)
-            total_stake[pid] = total_stake.get(pid, 0.0) + a
-            if morn:
-                morning_stake[pid] = morning_stake.get(pid, 0.0) + a
-
-    pids = sorted(total_stake.keys())
-    records = []
-    for pid in pids:
-        tot = total_stake.get(pid, 0.0)
-        val = (morning_stake.get(pid, 0.0) / tot) if tot > 0 else np.nan
-        records.append({"Player_Profile_ID": pid, "f44_morning_stakes_percentage": float(val) if pd.notna(val) else np.nan})
-
-    out = pd.DataFrame.from_records(records) if records else pd.DataFrame(
-        columns=["Player_Profile_ID", "f44_morning_stakes_percentage"]
-    )
+    logger = _setup_feature_logger(log_path, "f44_morning_stakes_percentage") if log_path else None
+    if stake_shares is None:
+        stake_shares = net_stake_time_shares(tables, x_tijdspad=x_tijdspad,
+                                             chunksize=chunksize, verbose=verbose, logger=logger)
+    out = stake_shares[["Player_Profile_ID", "f44_morning_stakes_percentage"]].copy()
     if logger:
-        logger.info(f"✅ F44 klaar: {len(out):,} spelers")
+        logger.info("F44 complete: %d players", len(out))
     return out
+
 
 # ------------------------------
 # F45: evening stakes percentage
@@ -6128,111 +6036,20 @@ def f45_evening_stakes_percentage(
     chunksize: int = 200_000,
     log_path: Path | None = None,
     verbose: bool = False,
+    stake_shares: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
+    """F45: net stake share at 16:00–23:59 UTC, using F44's refund allocation.
+
+    Successful VOID_BET/VOID_STAKE reduce the linked bet/session's original
+    stakes. Unknown links or zero net stakes yield NaN, not a zero share.
     """
-    F45 (spec):
-    Share (0..1) of amounts wagered (stakes) during the specified period that occur in:
-      16:00:00 to 23:59:59  =>  16 <= hour < 24
-
-    Uses WOK_Player_Account_Transaction:
-      - Transaction_Type == "STAKE"
-      - Transaction_Status == "SUCCESSFUL"
-      - amount aggregated as abs(Transaction_Amount)
-
-    Output:
-      - f45_evening_stakes_percentage: float in [0,1], NaN if total stake == 0
-    """
-    if log_path:
-        logger = _setup_feature_logger(log_path, "f45_evening_stakes_percentage")
-        logger.info("▶ START F45: Evening stakes share (16:00-23:59)")
-        if x_tijdspad:
-            logger.info(f"  Tijdsfiltering: {x_tijdspad[0]} - {x_tijdspad[1]} (no +1 logic)")
-    else:
-        logger = None
-
-    if x_tijdspad:
-        start_datum = parse_ddmmyyyy_to_timestamp(x_tijdspad[0])
-        eind_datum  = parse_ddmmyyyy_to_timestamp(x_tijdspad[1])
-    else:
-        start_datum = None
-        eind_datum  = None
-
-    txn_paths = tables.get("WOK_Player_Account_Transaction") or []
-    if not txn_paths:
-        return pd.DataFrame(columns=["Player_Profile_ID", "f45_evening_stakes_percentage"])
-
-    total_stake: Dict[str, float] = {}
-    evening_stake: Dict[str, float] = {}
-
-    coerced_stake_warned = False
-
-    for df in iter_csv_chunks(
-        paths=txn_paths,
-        usecols=[
-            "Player_Profile_ID",
-            "Transaction_Amount",
-            "Transaction_Datetime",
-            "Transaction_Type",
-            "Transaction_Status",
-        ],
-        chunksize=chunksize,
-        verbose=verbose,
-    ):
-        df = df[df["Player_Profile_ID"].notna()].copy()
-        if df.empty:
-            continue
-
-        ts = pd.to_datetime(df["Transaction_Datetime"], errors="coerce", utc=True).dt.tz_localize(None)
-        df = df[ts.notna()].copy()
-        if df.empty:
-            continue
-        df["ts"] = ts[ts.notna()].values
-
-        if start_datum is not None:
-            m = (df["ts"] >= start_datum) & (df["ts"] < eind_datum)
-            if not m.any():
-                continue
-            df = df.loc[m].copy()
-
-        typ = df["Transaction_Type"].fillna("").astype(str).str.upper()
-        st  = df["Transaction_Status"].fillna("").astype(str).str.upper()
-        df = df[(typ == "STAKE") & (st == "SUCCESSFUL")].copy()
-        if df.empty:
-            continue
-
-        df["amount"] = pd.to_numeric(df["Transaction_Amount"], errors="coerce")
-        df = df[df["amount"].notna()].copy()
-        if df.empty:
-            continue
-
-        to_flip = df["amount"] > 0
-        if to_flip.any():
-            df.loc[to_flip, "amount"] = -df.loc[to_flip, "amount"]
-            if logger and (not coerced_stake_warned):
-                logger.warning("⚠️ Coerced positive STAKE amounts to negative (one-time warning).")
-            coerced_stake_warned = True
-
-        df["hour"] = df["ts"].dt.hour.astype("int16")
-        is_evening = (df["hour"] >= 16) & (df["hour"] < 24)
-
-        for pid, amt, eve in zip(df["Player_Profile_ID"].astype(str), df["amount"].astype(float), is_evening.to_numpy()):
-            a = abs(amt)
-            total_stake[pid] = total_stake.get(pid, 0.0) + a
-            if eve:
-                evening_stake[pid] = evening_stake.get(pid, 0.0) + a
-
-    pids = sorted(total_stake.keys())
-    records = []
-    for pid in pids:
-        tot = total_stake.get(pid, 0.0)
-        val = (evening_stake.get(pid, 0.0) / tot) if tot > 0 else np.nan
-        records.append({"Player_Profile_ID": pid, "f45_evening_stakes_percentage": float(val) if pd.notna(val) else np.nan})
-
-    out = pd.DataFrame.from_records(records) if records else pd.DataFrame(
-        columns=["Player_Profile_ID", "f45_evening_stakes_percentage"]
-    )
+    logger = _setup_feature_logger(log_path, "f45_evening_stakes_percentage") if log_path else None
+    if stake_shares is None:
+        stake_shares = net_stake_time_shares(tables, x_tijdspad=x_tijdspad,
+                                             chunksize=chunksize, verbose=verbose, logger=logger)
+    out = stake_shares[["Player_Profile_ID", "f45_evening_stakes_percentage"]].copy()
     if logger:
-        logger.info(f"✅ F45 klaar: {len(out):,} spelers")
+        logger.info("F45 complete: %d players", len(out))
     return out
 
 # ------------------------------
@@ -6509,7 +6326,7 @@ def f47_median_seconds_session_start_to_period_end(
     return out
 
 # ------------------------------
-# F48: Percentage of bets with cash-out (proxy: BET_UPDATED)
+# F48: Percentage of non-void bets with cash-out
 # ------------------------------
 
 def f48_percentage_bets_with_cashout(
@@ -6523,11 +6340,14 @@ def f48_percentage_bets_with_cashout(
     """
     F48: Percentage of bets with cash-out.
 
-    Definitie (CDB datamodel, via de cash-out-TRANSACTIE — 1-op-1 met de root):
-    - Noemer: aantal unieke Bet_ID's geplaatst in de periode (Bet_Start_Datetime in [start, end)).
+    Projectdefinitie, via succesvolle CASH_OUT en zonder geannuleerde bets:
+    - Noemer: aantal unieke, niet-geannuleerde Bet_ID's geplaatst in de periode (Bet_Start_Datetime in [start, end)).
     - Teller: daarvan de bets met >= 1 cash-out. Een bet heeft een cash-out als één van zijn
       transacties (WOK_Bet_Transaction.transactions_id) voorkomt in WOK_Player_Account_Transaction
       met Transaction_Type == "CASH_OUT" en Transaction_Status == "SUCCESSFUL".
+
+    - Geannuleerde betstatussen en bets met succesvolle VOID_BET tellen niet mee
+      in teller of noemer. VOID_STAKE is een (gedeeltelijke) spelterugbetaling.
 
     Koppeling (relationeel): WOK_Bet_Transaction.transactions_id <-> WOK_Player_Account_Transaction.transaction_id
     (in het oude format: Bet_Transactions.Transaction_ID <-> WOK_Player_Account_Transaction.Transaction_ID).
@@ -6539,9 +6359,9 @@ def f48_percentage_bets_with_cashout(
     transactie zelf wordt NIET op de periode gefilterd (kan ná het bet-venster vallen).
 
     Benodigde input:
-    - WOK_Bet: pk_id, Bet_ID, Bet_Start_Datetime
+    - WOK_Bet: pk_id, Bet_ID, Bet_Start_Datetime, Bet_Status
     - WOK_Bet_Transaction: wok_bet_pk_id, player_profile_id, transactions_id
-    - WOK_Player_Account_Transaction: Transaction_ID, Transaction_Type, Transaction_Status
+    - WOK_Player_Account_Transaction: Player_Profile_ID, Transaction_ID, Transaction_Type, Transaction_Status
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f48_percentage_bets_with_cashout")
@@ -6563,31 +6383,34 @@ def f48_percentage_bets_with_cashout(
     if not bet_paths:
         return pd.DataFrame(columns=["Player_Profile_ID", "f48_percentage_bets_with_cashout"])
 
-    # ---- Stap 1: Transaction_ID's van geslaagde CASH_OUT-transacties ----
-    cashout_txids: set = set()
+    # Player+transaction is the identity; transaction IDs can be reused by players.
+    cashout_transactions: set = set()
+    void_transactions: set = set()
     for df in iter_csv_chunks(
         paths=tables.get("WOK_Player_Account_Transaction") or [],
-        usecols=["Transaction_ID", "Transaction_Type", "Transaction_Status"],
+        usecols=["Player_Profile_ID", "Transaction_ID", "Transaction_Type", "Transaction_Status"],
         chunksize=chunksize, verbose=verbose,
     ):
-        if df is None or df.empty:
-            continue
-        m = (df["Transaction_Type"].astype(str).str.upper() == "CASH_OUT") & \
-            (df["Transaction_Status"].astype(str).str.upper() == "SUCCESSFUL")
-        for txid in df.loc[m, "Transaction_ID"].tolist():
-            if txid is not None and not (isinstance(txid, float) and pd.isna(txid)):
-                cashout_txids.add(str(txid))
+        typ = df["Transaction_Type"].fillna("").astype(str).str.strip().str.upper()
+        status = df["Transaction_Status"].fillna("").astype(str).str.strip().str.upper()
+        mask = status.eq("SUCCESSFUL") & typ.isin(["CASH_OUT", "VOID_BET"])
+        for pid, txid, kind in zip(df.loc[mask, "Player_Profile_ID"], df.loc[mask, "Transaction_ID"], typ[mask]):
+            if pd.notna(pid) and pd.notna(txid):
+                target = cashout_transactions if kind == "CASH_OUT" else void_transactions
+                target.add((str(pid), str(txid)))
 
     # ---- Stap 2: spelers + txids per bet via WOK_Bet_Transaction-join (relationeel i.p.v. JSON) ----
     # We tellen unieke Bet_ID's per speler: total_bets & cashout_bets.
     total_bets_per_pid: Dict[str, set] = {}
     cashout_bets_per_pid: Dict[str, set] = {}
+    void_bets_per_pid: Dict[str, set] = {}
+    cancelled_bet_ids: set = set()
 
     bet_tx = build_bet_tx_map(tables.get("WOK_Bet_Transaction"), chunksize=chunksize)
 
     for df in iter_csv_chunks(
         paths=bet_paths,
-        usecols=["pk_id", "Bet_ID", "Bet_Start_Datetime"],
+        usecols=["pk_id", "Bet_ID", "Bet_Start_Datetime", "Bet_Status"],
         chunksize=chunksize,
         verbose=verbose,
     ):
@@ -6614,6 +6437,7 @@ def f48_percentage_bets_with_cashout(
 
         idx_bet_id = df.columns.get_loc("Bet_ID")
         idx_pk     = df.columns.get_loc("pk_id")
+        statuses = df.get("Bet_Status", pd.Series("", index=df.index)).fillna("").astype(str).str.strip().str.upper()
 
         for i in range(len(df)):
             bet_id = df.iat[i, idx_bet_id]
@@ -6623,33 +6447,35 @@ def f48_percentage_bets_with_cashout(
 
             pk = df.iat[i, idx_pk]
 
-            # spelers + transactie-ids per bet via WOK_Bet_Transaction-join (relationeel i.p.v. JSON)
-            pids: set = set()
-            txids: set = set()
+            transactions_per_player: Dict[str, set] = {}
             for pid, txid in bet_tx.get(pk, []):
-                if pid is not None and not (isinstance(pid, float) and pd.isna(pid)):
-                    pids.add(str(pid))
-                if txid is not None and not (isinstance(txid, float) and pd.isna(txid)):
-                    txids.add(str(txid))
+                if pd.notna(pid):
+                    txids = transactions_per_player.setdefault(str(pid), set())
+                    if pd.notna(txid):
+                        txids.add(str(txid))
 
-            if not pids:
-                continue
-
-            has_cashout = len(txids & cashout_txids) > 0
-            for pid in pids:
+            status = statuses.iloc[i].removeprefix("BET_")
+            cancelled = status in {"CANCELLED", "CANCELED", "VOID", "VOIDED"}
+            if cancelled:
+                cancelled_bet_ids.add(bet_id)
+            for pid, txids in transactions_per_player.items():
                 total_bets_per_pid.setdefault(pid, set()).add(bet_id)
-                if has_cashout:
+                identities = {(pid, txid) for txid in txids}
+                if cancelled or identities & void_transactions:
+                    void_bets_per_pid.setdefault(pid, set()).add(bet_id)
+                if identities & cashout_transactions:
                     cashout_bets_per_pid.setdefault(pid, set()).add(bet_id)
 
     # Build per-player output
     all_pids = sorted(total_bets_per_pid.keys())
     records = []
     for pid in all_pids:
-        total = len(total_bets_per_pid.get(pid, set()))
+        eligible = total_bets_per_pid.get(pid, set()) - void_bets_per_pid.get(pid, set()) - cancelled_bet_ids
+        total = len(eligible)
         if total == 0:
             val = np.nan
         else:
-            cash = len(cashout_bets_per_pid.get(pid, set()))
+            cash = len(cashout_bets_per_pid.get(pid, set()) & eligible)
             val = cash / total
         records.append({"Player_Profile_ID": pid, "f48_percentage_bets_with_cashout": val})
 
@@ -6956,18 +6782,19 @@ def f51_median_seconds_loss_to_next_bet(
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
-    F51: Median seconds from a losing bet to the next bet placed, per player.
+    F51: Median stake-to-next-stake seconds for qualifying intervals, including voids.
 
     Uses WOK_Player_Account_Transaction exclusively:
       - STAKE       → bet placed
       - WINNING     → preceding STAKE was won (not a loss)
-      - VOID_BET    → preceding STAKE was voided (not a loss)
+      - VOID_BET    → does not exclude the interval (project definition)
       - CASH_OUT    → not considered a loss
 
-    For each player, consecutive STAKE pairs are examined. If no WINNING or
-    VOID_BET occurred between STAKE[i] and STAKE[i+1], STAKE[i] is treated as
-    a lost bet. The delta = STAKE[i+1] - STAKE[i] in seconds.
-    F51 = median of all such deltas. NaN if no losing bets.
+    For each player, consecutive successful STAKE pairs are examined. If no
+    successful WINNING or CASH_OUT occurred between STAKE[i] and STAKE[i+1],
+    the interval counts, including intervals with VOID_BET refunds.
+    The delta = STAKE[i+1] - STAKE[i] in seconds, not resolution-to-placement time.
+    F51 = median of all such deltas. NaN if there are no qualifying intervals.
 
     x_tijdspad is applied to filter STAKE events (the period of activity).
     """
@@ -6990,7 +6817,7 @@ def f51_median_seconds_loss_to_next_bet(
     if not tx_paths:
         return pd.DataFrame(columns=["Player_Profile_ID", "f51_median_seconds_loss_to_next_bet"])
 
-    NON_LOSS_TYPES = {"WINNING", "VOID_BET", "CASH_OUT"}
+    NON_LOSS_TYPES = {"WINNING", "CASH_OUT"}
 
     # Per player: list of (datetime, transaction_type) sorted by time
     player_events: Dict[str, List] = {}
@@ -7004,7 +6831,8 @@ def f51_median_seconds_loss_to_next_bet(
         if df.empty:
             continue
 
-        df = df[df["Player_Profile_ID"].notna() & df["Transaction_Type"].notna()]
+        status = df["Transaction_Status"].fillna("").astype(str).str.strip().str.upper()
+        df = df[df["Player_Profile_ID"].notna() & df["Transaction_Type"].notna() & status.eq("SUCCESSFUL")]
         if df.empty:
             continue
 
@@ -9968,6 +9796,7 @@ FEATURES_REGISTRY = {
                 "pk_id",
                 "Bet_ID",
                 "Bet_Start_Datetime",
+                "Bet_Status",
             ],
             "WOK_Bet_Transaction": [
                 "wok_bet_pk_id",
@@ -9975,6 +9804,7 @@ FEATURES_REGISTRY = {
                 "transactions_id",
             ],
             "WOK_Player_Account_Transaction": [
+                "Player_Profile_ID",
                 "Transaction_ID",
                 "Transaction_Type",
                 "Transaction_Status",
@@ -10295,10 +10125,17 @@ FEATURES_REGISTRY = {
     },
     "f44_morning_stakes_percentage": {
         "stream_fn": f44_morning_stakes_percentage,
-        "tables": ["WOK_Player_Account_Transaction"],
+        "tables": ["WOK_Player_Account_Transaction", "WOK_Bet", "WOK_Bet_Transaction",
+                   "WOK_Game_Session", "WOK_Game_Session_Transaction"],
+        "optional_tables": ["WOK_Bet", "WOK_Game_Session"],
         "usecols": {
+            "WOK_Bet": ["pk_id", "Bet_ID"],
+            "WOK_Bet_Transaction": ["wok_bet_pk_id", "player_profile_id", "transactions_id"],
+            "WOK_Game_Session": ["pk_id", "Game_Session_ID"],
+            "WOK_Game_Session_Transaction": ["wok_game_session_pk_id", "player_profile_id", "transaction_id"],
             "WOK_Player_Account_Transaction": [
                 "Player_Profile_ID",
+                "Transaction_ID",
                 "Transaction_Amount",
                 "Transaction_Datetime",
                 "Transaction_Type",
@@ -10378,10 +10215,17 @@ FEATURES_REGISTRY = {
     },
     "f45_evening_stakes_percentage": {
         "stream_fn": f45_evening_stakes_percentage,
-        "tables": ["WOK_Player_Account_Transaction"],
+        "tables": ["WOK_Player_Account_Transaction", "WOK_Bet", "WOK_Bet_Transaction",
+                   "WOK_Game_Session", "WOK_Game_Session_Transaction"],
+        "optional_tables": ["WOK_Bet", "WOK_Game_Session"],
         "usecols": {
+            "WOK_Bet": ["pk_id", "Bet_ID"],
+            "WOK_Bet_Transaction": ["wok_bet_pk_id", "player_profile_id", "transactions_id"],
+            "WOK_Game_Session": ["pk_id", "Game_Session_ID"],
+            "WOK_Game_Session_Transaction": ["wok_game_session_pk_id", "player_profile_id", "transaction_id"],
             "WOK_Player_Account_Transaction": [
                 "Player_Profile_ID",
+                "Transaction_ID",
                 "Transaction_Amount",
                 "Transaction_Datetime",
                 "Transaction_Type",

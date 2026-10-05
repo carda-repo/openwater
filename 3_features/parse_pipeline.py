@@ -29,6 +29,7 @@ import re
 # Lokale modules (liggen naast dit bestand in _organisatie_code/3_features/)
 from path_finding import load_tables_local
 from balance_reconstruction import reconstruct_start_balances
+from stake_time_shares import net_stake_time_shares
 from feature_engineering import FEATURES_REGISTRY
 from feature_engineering_spanish import FEATURES_REGISTRY as FEATURES_REGISTRY_SPANISH
 from feature_engineering_basis import FEATURES_REGISTRY as FEATURES_REGISTRY_BASIS
@@ -236,12 +237,16 @@ def newest_features_input_dir(parent_dir: str | Path) -> Optional[Path]:
 
 
 # -----------------------------------------------------------------------------
-# _safe_merge (preserves unavailable balance features)
+# _safe_merge (preserves undefined balance and corrected void features)
 # -----------------------------------------------------------------------------
-_BALANCE_FEATURE_COLUMNS = {
+_UNKNOWN_FEATURE_COLUMNS = {
     "f26_balance_drop_frequency",
     "f27_deposits_after_below2_per_day",
     "f28_median_seconds_below2_to_deposit",
+    "f44_morning_stakes_percentage",
+    "f45_evening_stakes_percentage",
+    "f48_percentage_bets_with_cashout",
+    "f51_median_seconds_loss_to_next_bet",
 }
 
 
@@ -289,7 +294,7 @@ def _safe_merge(left: Optional[pd.DataFrame], right: Optional[pd.DataFrame]) -> 
     for col in out.columns:
         if (
             col != "Player_Profile_ID"
-            and col not in _BALANCE_FEATURE_COLUMNS
+            and col not in _UNKNOWN_FEATURE_COLUMNS
             and pd.api.types.is_numeric_dtype(out[col])
         ):
             out[col] = out[col].fillna(0)
@@ -378,16 +383,17 @@ def run_scenario(
     logs_dir.mkdir(exist_ok=True)
     # Run-scoped cache: share one reconstruction across F26/F27/F28 for each window.
     opening_balance_cache = {}
+    stake_share_cache = {}
 
     for key in feature_keys:
         print(f"\n🔨 Verwerken feature: {key}")
         huidige_tijd = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"   🕒 Tijdstip: {huidige_tijd}")
         spec = FEATURES_REGISTRY[key]
-        if bet_missing and "WOK_Bet" in spec["tables"]:
+        if bet_missing and "WOK_Bet" in spec["tables"] and "WOK_Bet" not in spec.get("optional_tables", []):
             print(f"⏭️ Feature '{key}' wordt overgeslagen (WOK_Bet ontbreekt).")
             continue
-        if game_session_missing and "WOK_Game_Session" in spec["tables"]:
+        if game_session_missing and "WOK_Game_Session" in spec["tables"] and "WOK_Game_Session" not in spec.get("optional_tables", []):
             print(f"⏭️ Feature '{key}' wordt overgeslagen (WOK_Game_Session ontbreekt).")
             continue
         if comlaints_missing and "WOK_Complaint" in spec["tables"]:
@@ -430,6 +436,15 @@ def run_scenario(
                     feat_tables, x_tijdspad=window, chunksize=chunksize, verbose=verbose,
                 )
             kwargs["start_balances"] = opening_balance_cache[cache_key]
+
+        if "stake_shares" in sig.parameters:
+            window = kwargs.get("x_tijdspad")
+            cache_key = tuple(window) if window else None
+            if cache_key not in stake_share_cache:
+                stake_share_cache[cache_key] = net_stake_time_shares(
+                    feat_tables, x_tijdspad=window, chunksize=chunksize, verbose=verbose,
+                )
+            kwargs["stake_shares"] = stake_share_cache[cache_key]
 
         f = stream_fn(
             tables=feat_tables,
