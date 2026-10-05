@@ -205,6 +205,10 @@ poetry run python run_pipeline.py --help
   `5_descriptive\run_descriptive.py` resp. `_logging\run_with_log.py` (see `README.md`).
 - **Data-driven monthly bucketing**: the sorting picks buckets based on the actual date range of
   your data — no fixed window, no data loss.
+- **F16 financial activation**: uses the first successful stake, deposit or withdrawal in the
+  available history and the last such transaction in the feature period. Supply transaction
+  history from before that period to recover the actual activation date. The period includes
+  the entire end date; elapsed calendar days have a minimum of 1 and no upper limit.
 
 ---
 
@@ -455,6 +459,10 @@ poetry run python run_pipeline.py --help
   `5_descriptive\run_descriptive.py` resp. `_logging\run_with_log.py` (zie `README.md`).
 - **Datagedreven maand-bucketing**: de sortering kiest de buckets op basis van het werkelijke
   datumbereik van je data — geen vast venster, geen dataverlies.
+- **F16 financiële activatie**: gebruikt de eerste succesvolle inzet, storting of opname in de
+  beschikbare historie en de laatste daarvan binnen het featurevenster. Lever ook eerdere
+  transactiehistorie aan om de echte activatiedatum te kunnen bepalen. De volledige einddatum
+  telt mee; verstreken kalenderdagen hebben een minimum van 1 en geen bovengrens.
 
 ---
 

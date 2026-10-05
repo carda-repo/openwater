@@ -246,7 +246,7 @@ Betting Behavior & Features
 Temporal Patterns & Trends
   • Active Period Span (F14) – Calculate the number of days between the player’s first and last monetary activity in the period. Find the date of the earliest transaction and the date of the latest transaction for that player (within the analysis window). Compute the difference in days and add 1 (inclusive). (Result is between 1 and ~183 days for a 6-month period.)
   • Active Day Fraction (F15) – Calculate the fraction of days in the span that the player was active. Divide F1 (active days count) by F14 (span of days from first to last play). This yields a value from 0 to 1 indicating how regularly the player engaged within the period.
-  • Account Age (F16) – Calculate how long the player has been active since account creation, up to the period end. Determine the number of days between the player’s account activation date (e.g. registration date or first deposit date) and the end of the period (or last transaction date in period). (Output is an integer number of days; if the account was created during the period, this could be less than F14.)
+  • Account Age (F16) – Calculate the calendar days elapsed between the first successful financial transaction in the available account history and the last successful financial transaction within the period. Financial transactions are STAKE, DEPOSIT and WITHDRAWAL. The result is at least 1 day. Historical transactions before the period are needed to determine financial activation; registration date is not used.
   • Stake Slope (First vs Second Half) (F53) – Measure the change in betting volume between the first half and second half of the period. First, find the median timestamp of the period (mid-point in time). Split all stakes into two groups: those placed before the median time and those after. Sum the stake amounts in each half. Compute the difference (second-half sum minus first-half sum), take the absolute value, and then divide by the total number of interactions in the period. This result is a normalized absolute “slope” of wagering activity over time.
   • Post-Median Active Days % (F54) – Calculate what portion of active days occurred in the second half of the period. Split the active days list by the median date of the period. Count how many of the player’s active days fall in the latter half, and divide by F1 (total active days). This yields a fraction (0–1) indicating if activity was skewed towards the end of the period.
   • Stake Variance Difference (F55) – Compare the variability of stake amounts between the first and second half of the period. Take all bet stakes from the first half (before median date) and compute their variance, and do the same for stakes in the second half. Then compute the absolute difference between the two variances.
@@ -2306,7 +2306,7 @@ def f15_active_day_fraction(
 
 
 # ------------------------------
-# F16: Account Age - Days since account creation
+# F16: Account Age - Days since financial activation
 # ------------------------------
 
 def f16_account_age(
@@ -2318,72 +2318,83 @@ def f16_account_age(
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
-    F16: Account Age
+    F16: calendar days from financial activation to the last financial transaction
+    in the specified period, with a minimum of 1 day and no upper limit.
 
-    Calculate how long the player has been active since account creation.
-    Number of days between registration date and end of period (or last transaction).
+    Financial transactions are successful STAKE, DEPOSIT and WITHDRAWAL entries
+    in WOK_Player_Account_Transaction. Activation uses the first such transaction
+    across the available history, including transactions before the period.
+    Complete history is needed to recover the actual activation date; there is
+    no fallback to registration date.
 
-    Input:
-        - WOK_Player_Profile: Player_Profile_Registration_Datetime
+    Both date boundaries in x_tijdspad are inclusive UTC calendar dates. Without
+    x_tijdspad, the last financial transaction in the available history is used.
+    Players with no qualifying transaction in the period are omitted.
 
-    Output:
-        - f16_account_age: Integer (days since registration)
+    Output: Player_Profile_ID and f16_account_age (integer days).
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f16_account_age")
-        logger.info("▶ START F16: Account Age")
+        logger.info("▶ START F16: Days since financial activation")
         if x_tijdspad:
-            logger.info(f"  Reference date: {x_tijdspad[1]}")
+            logger.info(f"  Period: {x_tijdspad[0]} - {x_tijdspad[1]} (inclusive dates)")
+        logger.info("  Activation: first successful financial transaction in available history")
     else:
         logger = None
 
-    # Determine reference date
+    start_date = end_exclusive = None
     if x_tijdspad:
-        reference_date = parse_ddmmyyyy_to_timestamp(x_tijdspad[1])
-    else:
-        reference_date = pd.Timestamp.now()
+        start_date = parse_ddmmyyyy_to_timestamp(x_tijdspad[0])
+        end_exclusive = parse_ddmmyyyy_to_timestamp(x_tijdspad[1]) + pd.Timedelta(days=1)
 
-    profile_paths = tables.get("WOK_Player_Profile")
-    if not profile_paths:
+    transaction_paths = tables.get("WOK_Player_Account_Transaction")
+    if not transaction_paths:
         return pd.DataFrame(columns=["Player_Profile_ID", "f16_account_age"])
 
-    age_per_speler: Dict[str, int] = {}
+    activation_by_player: Dict[str, pd.Timestamp] = {}
+    last_by_player: Dict[str, pd.Timestamp] = {}
 
     for df in iter_csv_chunks(
-        paths=profile_paths,
-        usecols=["Player_Profile_ID", "Player_Profile_Registration_Datetime"],
+        paths=transaction_paths,
+        usecols=["Player_Profile_ID", "Transaction_Datetime", "Transaction_Type", "Transaction_Status"],
         chunksize=chunksize,
         verbose=verbose,
     ):
-        df = df[df["Player_Profile_ID"].notna() & df["Player_Profile_Registration_Datetime"].notna()].copy()
+        financial = (
+            df["Player_Profile_ID"].notna()
+            & df["Player_Profile_ID"].astype(str).str.strip().ne("")
+            & df["Transaction_Status"].astype(str).str.strip().str.upper().eq("SUCCESSFUL")
+            & df["Transaction_Type"].astype(str).str.strip().str.upper().isin(["STAKE", "DEPOSIT", "WITHDRAWAL"])
+        )
+        df = df.loc[financial].copy()
         if df.empty:
             continue
 
-        # Parse registration date
-        df["reg_date"] = pd.to_datetime(df["Player_Profile_Registration_Datetime"], errors="coerce")
-        df = df[df["reg_date"].notna()]
+        df["_timestamp"] = pd.to_datetime(
+            df["Transaction_Datetime"], errors="coerce", utc=True, format="ISO8601",
+        ).dt.tz_localize(None)
+        df = df.loc[df["_timestamp"].notna()]
+        if end_exclusive is not None:
+            df = df.loc[df["_timestamp"] < end_exclusive]
+        if df.empty:
+            continue
 
-        # Remove timezone info to ensure compatibility
-        df["reg_date"] = df["reg_date"].dt.tz_localize(None)
+        # Activation is not restricted to the lower boundary of the period.
+        for player_id, first in df.groupby("Player_Profile_ID")["_timestamp"].min().items():
+            if player_id not in activation_by_player or first < activation_by_player[player_id]:
+                activation_by_player[player_id] = first
 
-        # Calculate account age in days
-        reference_date_naive = pd.Timestamp(reference_date).tz_localize(None) if hasattr(reference_date, 'tz') and reference_date.tz else reference_date
-        df["age_days"] = (reference_date_naive - df["reg_date"]).dt.days
+        period_df = df if start_date is None else df.loc[df["_timestamp"] >= start_date]
+        for player_id, last in period_df.groupby("Player_Profile_ID")["_timestamp"].max().items():
+            if player_id not in last_by_player or last > last_by_player[player_id]:
+                last_by_player[player_id] = last
 
-        # Filter reasonable values (0 to 10 years)
-        df = df[(df["age_days"] >= 0) & (df["age_days"] <= 3650)]
-
-        for _, row in df.iterrows():
-            player_id = row["Player_Profile_ID"]
-            age_per_speler[player_id] = int(row["age_days"])
-
-    if age_per_speler:
-        result = pd.DataFrame([
-        {"Player_Profile_ID": pid, "f16_account_age": age}
-        for pid, age in age_per_speler.items()
-    ])
-    else:
-        result = pd.DataFrame(columns=["Player_Profile_ID", "f16_account_age"])
+    records = [
+        {"Player_Profile_ID": player_id,
+         "f16_account_age": max(1, (last.date() - activation_by_player[player_id].date()).days)}
+        for player_id, last in last_by_player.items()
+    ]
+    result = pd.DataFrame.from_records(records, columns=["Player_Profile_ID", "f16_account_age"])
 
     if logger:
         logger.info(f"✅ F16 Account Age klaar: {len(result):,} spelers")
@@ -9877,11 +9888,13 @@ FEATURES_REGISTRY = {
     },
     "f16_account_age": {
         "stream_fn": f16_account_age,
-        "tables": ["WOK_Player_Profile"],
+        "tables": ["WOK_Player_Account_Transaction"],
         "usecols": {
-            "WOK_Player_Profile": [
+            "WOK_Player_Account_Transaction": [
                 "Player_Profile_ID",
-                "Player_Profile_Registration_Datetime",
+                "Transaction_Datetime",
+                "Transaction_Type",
+                "Transaction_Status",
             ],
         },
         "log_name": "f16_account_age.log",
