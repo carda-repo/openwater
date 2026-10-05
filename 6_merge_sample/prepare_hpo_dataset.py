@@ -14,6 +14,7 @@ import sys
 import json
 import pickle
 import argparse
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,10 @@ from hpsearch_runner import (
     make_Xy,
     extract_targets,
     log,
+)
+
+from identity_splitting import (
+    identity_enabled, person_holdout,
 )
 
 ID_COL = "Player_Profile_ID"
@@ -94,19 +99,57 @@ def prepare_dataset(cfg: dict):
     elif filter_active and "ACTIVE_FLAG" not in df_valid.columns:
         log("[PREPARE] ⚠  ACTIVE_FLAG niet gevonden in data — geen filtering toegepast")
 
-    X_train, y_train, feature_cols = make_Xy(df_valid, ID_COL, tgt_valid)
+    # Build and filter the entire test candidate set before assigning persons.
+    # This also covers the operator-holdout path; sampling applies only afterwards.
+    holdout_operators = cfg.get("fold_holdout_operators") or []
+    if holdout_operators:
+        log(f"[PREPARE] Building holdout dataset for operators: {holdout_operators}")
+        cfg_holdout = {**cfg, "all_operators": holdout_operators}
+        df_test, _, meta_test, _ = build_all_operators_merged_df(
+            cfg=cfg_holdout,
+            data_dir=data_dir,
+            validation_period_prefixes=validation_period_prefixes,
+            test_period_prefixes=[],
+            id_col=ID_COL,
+            explicit_target_col=target_col,
+            column_prefixes=generic_col_prefixes,
+        )
+    if filter_active and "ACTIVE_FLAG" in df_test.columns:
+        n_before = len(df_test)
+        df_test = df_test[df_test["ACTIVE_FLAG"] != False]  # noqa: E712
+        log(f"[PREPARE] ACTIVE_FLAG filter (test): {n_before - len(df_test)} rijen verwijderd")
 
+    enabled = identity_enabled(cfg)
+    identity_col = (cfg.get("Niels_identity_column") or ID_COL) if enabled else None
+    df_valid, df_test, groups_train, groups_test, identity_meta = person_holdout(
+        df_valid, df_test, cfg, id_col=ID_COL,
+    )
+    if enabled:
+        # Every prepared payload carries provenance, so a stale test pickle cannot
+        # accidentally be paired with a newly prepared development dataset.
+        identity_meta["identity_dataset_id"] = uuid.uuid4().hex
+        log(f"[PREPARE] Person separation: {identity_meta['n_persons_development']:,} development, "
+            f"{identity_meta['n_persons_test']:,} test persons")
+
+    X_train, y_train, feature_cols = make_Xy(df_valid, ID_COL, tgt_valid, identity_col=identity_col)
     log(f"[PREPARE] Valid: {len(X_train):,} rows, {len(feature_cols)} features, "
         f"{int(y_train.sum()):,} positives ({y_train.mean()*100:.2f}%)")
 
     if sampling_ratio > 0:
         X_train, y_train = undersample_negatives(X_train, y_train, sampling_ratio)
+        if enabled:
+            groups_train = groups_train.loc[X_train.index].copy()
         log(f"[PREPARE] After undersampling 1:{sampling_ratio}: "
             f"{len(X_train):,} rows ({int(y_train.sum()):,} pos + {int((y_train==0).sum()):,} neg)")
+    if enabled and X_train.empty:
+        raise ValueError("Identity-split development dataset is empty after undersampling")
 
     log("[PREPARE] Saving pickles...")
+    train_payload = {"X": X_train, "y": y_train}
+    if enabled:
+        train_payload.update({"groups": groups_train, "identity_metadata": identity_meta})
     with open(dataset_path / "valid_sampled.pkl", "wb") as f:
-        pickle.dump({"X": X_train, "y": y_train}, f, protocol=4)
+        pickle.dump(train_payload, f, protocol=4)
 
     meta = {
         "n_valid": int(len(X_train)),
@@ -116,53 +159,25 @@ def prepare_dataset(cfg: dict):
         "n_features": len(feature_cols),
         "feature_cols": list(feature_cols),
         "target_valid": tgt_valid,
+        **identity_meta,
     }
-
-    holdout_operators = cfg.get("fold_holdout_operators") or []
-    if holdout_operators:
-        # Operator-fold mode: build test set from holdout operators (same time periods as train)
-        log(f"[PREPARE] Building holdout dataset for operators: {holdout_operators}")
-        cfg_holdout = {**cfg, "all_operators": holdout_operators}
-        df_holdout, _, meta_holdout, _ = build_all_operators_merged_df(
-            cfg=cfg_holdout,
-            data_dir=data_dir,
-            validation_period_prefixes=validation_period_prefixes,
-            test_period_prefixes=[],
-            id_col=ID_COL,
-            explicit_target_col=target_col,
-            column_prefixes=generic_col_prefixes,
-        )
-        if not df_holdout.empty:
-            tgt_holdout = get_target(df_holdout)
-            if filter_active and "ACTIVE_FLAG" in df_holdout.columns:
-                n_before = len(df_holdout)
-                df_holdout = df_holdout[df_holdout["ACTIVE_FLAG"] != False]  # noqa: E712
-                log(f"[PREPARE] ACTIVE_FLAG filter (holdout): {n_before - len(df_holdout)} rijen verwijderd")
-            X_test, y_test, _ = make_Xy(df_holdout, ID_COL, tgt_holdout)
-            log(f"[PREPARE] Holdout: {len(X_test):,} rows, {int(y_test.sum()):,} positives "
-                f"({y_test.mean()*100:.2f}%)")
-            with open(dataset_path / "test_full.pkl", "wb") as f:
-                pickle.dump({"X": X_test, "y": y_test}, f, protocol=4)
-            meta["n_test"] = int(len(X_test))
-            meta["n_pos_test"] = int(y_test.sum())
-            meta["target_test"] = tgt_holdout
-            meta["holdout_operators"] = holdout_operators
-        else:
-            log("[PREPARE] ⚠  Holdout operators produced no data — skipping test_full.pkl")
-    elif not df_test.empty:
+    if not df_test.empty:
         tgt_test = get_target(df_test)
-        if filter_active and "ACTIVE_FLAG" in df_test.columns:
-            n_before = len(df_test)
-            df_test = df_test[df_test["ACTIVE_FLAG"] != False]  # noqa: E712
-            log(f"[PREPARE] ACTIVE_FLAG filter (test): {n_before - len(df_test)} rijen verwijderd")
-        X_test, y_test, _ = make_Xy(df_test, ID_COL, tgt_test)
-        log(f"[PREPARE] Test:  {len(X_test):,} rows, {int(y_test.sum()):,} positives")
+        X_test, y_test, _ = make_Xy(df_test, ID_COL, tgt_test, identity_col=identity_col)
+        log(f"[PREPARE] Test: {len(X_test):,} rows, {int(y_test.sum()):,} positives")
+        test_payload = {"X": X_test, "y": y_test}
+        if enabled:
+            test_payload.update({"groups": groups_test, "identity_metadata": identity_meta})
         with open(dataset_path / "test_full.pkl", "wb") as f:
-            pickle.dump({"X": X_test, "y": y_test}, f, protocol=4)
+            pickle.dump(test_payload, f, protocol=4)
         meta["n_test"] = int(len(X_test))
         meta["n_pos_test"] = int(y_test.sum())
         meta["target_test"] = tgt_test
+        if holdout_operators:
+            meta["holdout_operators"] = holdout_operators
     else:
+        if enabled:
+            (dataset_path / "test_full.pkl").unlink(missing_ok=True)
         log("[PREPARE] No test data — skipping test_full.pkl")
     (dataset_path / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     log(f"[PREPARE] Done: {dataset_path}")

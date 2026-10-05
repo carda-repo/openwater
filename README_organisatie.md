@@ -234,6 +234,24 @@ poetry run python run_pipeline.py --help
   opening balance unknown. Conflicting final bet statuses at the latest extraction leave
   ordinary F51 losses unknown; a newer status can resolve that conflict. VOID_BET refund
   evidence remains independent. These rules also apply across chunk and file boundaries.
+- **Identity-separated evaluation**: `Niels_Identity_Confounding_switch=True` is the default.
+  The grouping key is `(operator, Player_Profile_ID)`, using the same operator identifier
+  as operator-level folds (the operator folder name). All periods for that combination
+  remain together. The same player ID at two operators represents two different groups.
+  For overlapping development/test identities, 20% of the available identities are reserved
+  for the test set before sampling; their earlier rows are excluded from development, and
+  only their test-period rows are evaluated. Already disjoint holdouts, including operator
+  holdouts, keep their existing boundaries. Cross-validation keeps all rows of an identity
+  together. With no test-period data, only grouped cross-validation is applied.
+  The split is reproducible using `random_state` and is recorded in dataset metadata.
+  Set `Niels_Identity_Confounding_switch=False` in Python/YAML, or pass
+  `--no-Niels_Identity_Confounding_switch`, to use the previous splitting behaviour.
+  Rebuild prepared datasets when changing the setting; older datasets without identity
+  metadata cannot be used with the switch on. Group identifiers are not model inputs.
+  This tests generalisation to held-out operator/player combinations; use a later test
+  period as well when evaluating future performance. It does not link one person across
+  different operators. `Niels_identity_column` / `--niels-identity-column` can select a
+  different player identity column in the feature CSVs; the operator remains part of the key.
 - **Void rules for F44/F45/F48/F51**: F44/F45 use stakes net of successful
   `VOID_BET`/`VOID_STAKE` refunds, allocated proportionally to the linked bet/session's
   original stakes and placement hours. Refunds after the exclusive window end are ignored.
@@ -530,6 +548,24 @@ poetry run python run_pipeline.py --help
   op dezelfde extractietijd maken gewone F51-verliezen onbekend; een nieuwere status kan
   dat oplossen. Een VOID_BET-terugbetaling blijft onafhankelijk bewijs. Deze regels gelden
   ook over chunk- en bestandsgrenzen.
+- **Evaluatie met gescheiden identiteiten**: `Niels_Identity_Confounding_switch=True` is de
+  standaard. De groepssleutel is `(aanbieder, Player_Profile_ID)`, met dezelfde aanbiederidentifier
+  als de operator-folds (de naam van de aanbiedermap). Alle periodes voor die combinatie blijven
+  bijeen. Dezelfde speler-ID bij twee aanbieders vormt twee afzonderlijke groepen.
+  Bij overlappende ontwikkel-/testidentiteiten wordt vóór het samplen 20% voor de testset
+  gereserveerd. Hun eerdere rijen worden uit de ontwikkelset gehouden; alleen hun rijen uit
+  de testperiode worden geëvalueerd. Reeds gescheiden holdouts, waaronder operator-holdouts,
+  behouden hun bestaande verdeling. Cross-validation houdt alle rijen van dezelfde identiteit
+  bijeen. Zonder testperiode wordt alleen cross-validation op identiteitsgroepen toegepast.
+  `random_state` maakt de verdeling reproduceerbaar; de datasetmetadata leggen de instelling
+  vast. Zet in Python/YAML `Niels_Identity_Confounding_switch=False`, of gebruik
+  `--no-Niels_Identity_Confounding_switch`, voor de eerdere manier van splitsen. Bouw de dataset
+  opnieuw bij een andere instelling; oude datasets zonder identiteitsmetadata kunnen niet met
+  de switch aan worden gebruikt. Groepsidentifiers zijn geen modelkenmerken. Deze verdeling
+  toetst generalisatie naar achtergehouden aanbieder/speler-combinaties; gebruik daarnaast een
+  latere testperiode om toekomstige prestaties te meten. De verdeling koppelt dezelfde persoon
+  bij verschillende aanbieders niet. Met `Niels_identity_column` / `--niels-identity-column`
+  kun je een andere spelerskolom in de feature-CSV's kiezen; de aanbieder blijft deel van de sleutel.
 - **Voidregels voor F44/F45/F48/F51**: F44/F45 verrekenen succesvolle
   `VOID_BET`/`VOID_STAKE` naar verhouding met de oorspronkelijke inzetten van de gekoppelde
   weddenschap/spelsessie en hun inzettijdstippen. Terugbetalingen na de exclusieve einddatum

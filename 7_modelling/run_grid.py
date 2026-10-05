@@ -59,7 +59,11 @@ def parse_args(argv=None):
     p.add_argument("--test", dest="run_test", action="store_true", default=True)
     p.add_argument("--no-test", dest="run_test", action="store_false")
     p.add_argument("--round", dest="do_round", action="store_true", default=False)
-    p.add_argument("--random-state", type=int, default=23)
+    p.add_argument("--random-state", type=int, default=None)
+    p.add_argument("--Niels_Identity_Confounding_switch", "--niels-identity-confounding-switch",
+                   dest="Niels_Identity_Confounding_switch", action=argparse.BooleanOptionalAction,
+                   default=None, help="Scheid personen; default aan, of volg de YAML-instelling.")
+    p.add_argument("--niels-identity-column", dest="Niels_identity_column", default=None)
     return p.parse_args(argv)
 
 
@@ -71,6 +75,13 @@ def main(argv=None) -> int:
         data_dir=args.data_dir,
         operators=_split(args.operators),
     )
+    if args.Niels_Identity_Confounding_switch is not None:
+        cfg["Niels_Identity_Confounding_switch"] = args.Niels_Identity_Confounding_switch
+    if args.Niels_identity_column is not None:
+        cfg["Niels_identity_column"] = args.Niels_identity_column
+    if args.random_state is not None:
+        cfg["random_state"] = args.random_state
+    model_seed = 23 if args.random_state is None else args.random_state
     print(f"[run_grid] config       : {args.config}")
     print(f"[run_grid] dataset-path : {args.dataset_path or '(geen — bouwt uit data_dir)'}")
     print(f"[run_grid] out-dir      : {args.out_dir}")
@@ -81,7 +92,7 @@ def main(argv=None) -> int:
         models=_split(args.models), grids=_split(args.grids),
         operators=_split(args.operators), run_variants=_split(args.run_variants),
         cv_folds=args.cv_folds, run_valid=args.run_valid, run_test=args.run_test,
-        do_round=args.do_round, random_state=args.random_state,
+        do_round=args.do_round, random_state=model_seed,
     )
     print(f"\n[run_grid] ✅ Klaar in {time.perf_counter()-t0:,.2f}s — {len(produced)} taken")
     return 0

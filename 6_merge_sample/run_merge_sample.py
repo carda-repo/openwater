@@ -60,7 +60,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--config",
         type=Path,
         default=None,
-        help="Effectieve config-yaml (puur faithful). Als gezet, worden de losse vlaggen genegeerd.",
+        help="Effectieve config-yaml. Identiteitsswitch, spelerskolom en split-seed kunnen expliciet worden overschreven.",
     )
     parser.add_argument("--data-dir", type=Path, default=None,
                         help="Map met per-operator submappen (data_dir/<op>/).")
@@ -80,6 +80,12 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Base-scenario naam in de bestandsnamen (default: Flexible_spanish_plus).")
     parser.add_argument("--all-scenario-name", default="ALL",
                         help="Naam van de ALL-stats bestanden (default: ALL).")
+    parser.add_argument("--Niels_Identity_Confounding_switch", "--niels-identity-confounding-switch",
+                        dest="Niels_Identity_Confounding_switch", action=argparse.BooleanOptionalAction,
+                        default=None, help="Scheid identiteiten; default aan, of volg de YAML-instelling.")
+    parser.add_argument("--niels-identity-column", dest="Niels_identity_column", default=None,
+                        help="Spelerskolom in featurebestanden; default Player_Profile_ID. Aanbieder blijft deel van de sleutel.")
+    parser.add_argument("--random-state", type=int, default=None)
     return parser.parse_args(argv)
 
 
@@ -110,12 +116,23 @@ def main(argv=None) -> int:
             target_col=args.target_col,
             base_scenario=args.base_scenario,
             all_scenario_name=args.all_scenario_name,
+            Niels_Identity_Confounding_switch=(True if args.Niels_Identity_Confounding_switch is None
+                                               else args.Niels_Identity_Confounding_switch),
+            Niels_identity_column=args.Niels_identity_column,
+            random_state=23 if args.random_state is None else args.random_state,
         )
         print(f"[run_merge_sample] data-dir       : {args.data_dir}")
         print(f"[run_merge_sample] operators      : {cfg['all_operators']}")
         print(f"[run_merge_sample] valid-prefixes : {cfg['validation_period_prefixes']}")
         print(f"[run_merge_sample] sampling-ratio : {cfg['sampling_ratio']}")
         print(f"[run_merge_sample] dataset-path   : {args.dataset_path}")
+
+    if args.Niels_Identity_Confounding_switch is not None:
+        cfg["Niels_Identity_Confounding_switch"] = args.Niels_Identity_Confounding_switch
+    if args.Niels_identity_column is not None:
+        cfg["Niels_identity_column"] = args.Niels_identity_column
+    if args.random_state is not None:
+        cfg["random_state"] = args.random_state
 
     t0 = time.perf_counter()
     out = merge_and_sample(cfg)

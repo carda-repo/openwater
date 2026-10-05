@@ -53,7 +53,11 @@ def parse_args(argv=None):
     p.add_argument("--cv5-top-n", type=int, default=5)
     p.add_argument("--round", dest="do_round", action="store_true", default=False)
     p.add_argument("--no-multivariate", action="store_true", default=False)
-    p.add_argument("--random-state", type=int, default=23)
+    p.add_argument("--random-state", type=int, default=None)
+    p.add_argument("--Niels_Identity_Confounding_switch", "--niels-identity-confounding-switch",
+                   dest="Niels_Identity_Confounding_switch", action=argparse.BooleanOptionalAction,
+                   default=None, help="Scheid personen; default aan, of volg de YAML-instelling.")
+    p.add_argument("--niels-identity-column", dest="Niels_identity_column", default=None)
     return p.parse_args(argv)
 
 
@@ -66,6 +70,13 @@ def main(argv=None) -> int:
         operators=_split(args.operators),
         exclude_models=_split(args.exclude_models),
     )
+    if args.Niels_Identity_Confounding_switch is not None:
+        cfg["Niels_Identity_Confounding_switch"] = args.Niels_Identity_Confounding_switch
+    if args.Niels_identity_column is not None:
+        cfg["Niels_identity_column"] = args.Niels_identity_column
+    if args.random_state is not None:
+        cfg["random_state"] = args.random_state
+    model_seed = 23 if args.random_state is None else args.random_state
     print(f"[run_optuna] config       : {args.config}")
     print(f"[run_optuna] dataset-path : {args.dataset_path or '(geen — bouwt uit data_dir)'}")
     print(f"[run_optuna] out-dir      : {args.out_dir}")
@@ -77,7 +88,7 @@ def main(argv=None) -> int:
         time_budget=args.time_budget, cv_folds=args.cv_folds, n_startup=args.n_startup,
         validate_best=args.validate_best, cv5_top_n=args.cv5_top_n,
         do_round=args.do_round, no_multivariate=args.no_multivariate,
-        random_state=args.random_state,
+        random_state=model_seed,
     )
     print(f"\n[run_optuna] ✅ Klaar in {time.perf_counter()-t0:,.2f}s — output: {out}")
     return 0

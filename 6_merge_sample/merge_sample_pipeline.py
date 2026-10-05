@@ -45,6 +45,9 @@ def build_config(
     base_scenario: str = "Flexible_spanish_plus",
     all_scenario_name: str = "ALL",
     fold_holdout_operators: Optional[List[str]] = None,
+    Niels_Identity_Confounding_switch: bool = True,
+    Niels_identity_column: Optional[str] = None,
+    random_state: int = 23,
 ) -> Dict:
     """
     Stel de config-dict samen die `prepare_dataset` verwacht (identiek aan de effectieve
@@ -52,6 +55,8 @@ def build_config(
 
     sampling_ratio : 0 = geen sampling; N = behoud alle positives + N× zoveel negatives.
     target_col     : leeg = automatisch afleiden uit de period-prefix (y_self_exclusion_*).
+    Niels_Identity_Confounding_switch : standaard True; scheidt personen vóór sampling.
+    Niels_identity_column : gedeelde persoonscode, standaard Player_Profile_ID.
     """
     cfg: Dict = {
         "all_mode": True,
@@ -64,7 +69,11 @@ def build_config(
         "target_col": target_col or "",
         "base_scenario": base_scenario,
         "all_scenario_name": all_scenario_name,
+        "Niels_Identity_Confounding_switch": Niels_Identity_Confounding_switch,
+        "random_state": int(random_state),
     }
+    if Niels_identity_column:
+        cfg["Niels_identity_column"] = Niels_identity_column
     if fold_holdout_operators:
         cfg["fold_holdout_operators"] = list(fold_holdout_operators)
     return cfg
