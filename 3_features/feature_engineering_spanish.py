@@ -204,7 +204,7 @@ Risk Behaviors (Chasing Losses/Wins)
   • Balance Drop Events (F26) – Count how many times the player’s account balance fell from above €2 to below €2 during the period. To calculate, reconstruct the account balance chronologically using all transactions. Identify instances where, after a bet or other debit, the balance goes below €2 when it was ≥ €2 before. Count each such threshold-crossing event.
   • Deposits After Low Balance (F27) – Count how many times the player made a deposit shortly after depleting their balance below €2. For each event identified in F26 (balance < €2), check if the player’s next transaction was a deposit. Count the number of deposits that were preceded by a sub-€2 balance event. Divide by F1 to normalize per day. (If the player never dropped below €2, this can be “NA”.)
   • Time to Replenish Low Balance (F28) – Measure the median time (in seconds) it takes for the player to deposit after their balance falls below €2. For each balance drop event (from F26), calculate the time difference until the next deposit transaction. Then take the median of these intervals. (If no deposits followed low-balance events, output NA.)
-  • Quick Re-Bet After Loss (F51) – Calculate the typical time the player waits after losing a bet before placing a new bet. The implementation measures consecutive successful STAKE intervals without an intervening successful WINNING or CASH_OUT; VOID_BET does not exclude an interval under the project definition. Take their median in seconds. This remains a stake-to-stake proxy, rather than timing from bet resolution.
+  • Quick Re-Bet After Loss (F51) – Calculate the typical time the player waits after losing a bet before placing a new bet. Combine bet updates by operator/Bet_ID and identify settled bets with successful stakes but no positive winnings or cash-outs of their own. Measure from the first settled Extraction_Date (a resolution-time proxy) to the next bet placement with a successful stake, then take the median. VOID_BET refunds also qualify by project choice, timed from the refund transaction. Open bets never qualify as losses.
   • Larger Bets After Big Win (F52) – Count instances of the player substantially increasing their stake sizes following a major win. To do this, scan the sequence of bets: whenever the player receives a large win (significant payout), compare the average stake of the next ~10 bets to the average stake of the previous ~10 bets. If the post-win average bet size is at least double the pre-win average, count this as an occurrence. (Use at least 5 bets before/after if 10 are not available. If fewer than 5 prior or subsequent bets, that win is not evaluated.) Sum all such occurrences in the period.
 
 Game Preferences & Diversity
@@ -285,6 +285,7 @@ import numpy as np
 from path_finding import iter_csv_chunks
 from balance_reconstruction import reconstruct_start_balances
 from stake_time_shares import net_stake_time_shares
+from bet_loss_intervals import median_loss_to_next_bet
 from reading_difficult_json import simple_Player_Profile_Bank_Account_json_iterator, simple_RG_Class_Value_from_FLAG_RG_CLASS_json_iterator 
 from mapping_helpers import build_txid_to_player_map_ram, haal_uit_bank_json_iterator
 from reading_difficult_json import iter_limit_values, iter_transaction_ids_from_Game_Transactions, iter_part_ids_from_Bet_Parts, iter_player_profile_ids_from_Bet_Transactions, iter_transaction_ids_from_Bet_Transactions, get_list_of_response_ids_from_Responses_list, iter_part_live_flags_from_Bet_Parts, _safe_load_json_relaxed
@@ -6781,110 +6782,20 @@ def f51_median_seconds_loss_to_next_bet(
     log_path: Path | None = None,
     verbose: bool = False,
 ) -> pd.DataFrame:
+    """F51: median seconds from a resolved no-prize bet to the next bet.
+
+    Bet updates are combined by operator/Bet_ID. Only successful transactions of
+    that bet determine its outcome; open bets are not losses. A loss requires a
+    successful stake, a settled status and no positive winning or cash-out.
+    The first settled Extraction_Date approximates resolution time. VOID_BET
+    refunds count by project choice, using their actual Transaction_Datetime.
+    The next bet requires a successful stake and uses Bet_Start_Datetime.
+    Closures and next placements must fall in [start, end). No usable interval
+    yields NaN, preserved by the pipeline. Each input table is scanned once.
     """
-    F51: Median stake-to-next-stake seconds for qualifying intervals, including voids.
-
-    Uses WOK_Player_Account_Transaction exclusively:
-      - STAKE       → bet placed
-      - WINNING     → preceding STAKE was won (not a loss)
-      - VOID_BET    → does not exclude the interval (project definition)
-      - CASH_OUT    → not considered a loss
-
-    For each player, consecutive successful STAKE pairs are examined. If no
-    successful WINNING or CASH_OUT occurred between STAKE[i] and STAKE[i+1],
-    the interval counts, including intervals with VOID_BET refunds.
-    The delta = STAKE[i+1] - STAKE[i] in seconds, not resolution-to-placement time.
-    F51 = median of all such deltas. NaN if there are no qualifying intervals.
-
-    x_tijdspad is applied to filter STAKE events (the period of activity).
-    """
-    if log_path:
-        logger = _setup_feature_logger(log_path, "f51_median_seconds_loss_to_next_bet")
-        logger.info("▶ START F51: Median seconds from losing STAKE to next STAKE (via WOK_Player_Account_Transaction)")
-        if x_tijdspad:
-            logger.info(f"  Tijdsfiltering: {x_tijdspad[0]} - {x_tijdspad[1]}")
-    else:
-        logger = None
-
-    if x_tijdspad:
-        start_datum = parse_ddmmyyyy_to_timestamp(x_tijdspad[0])
-        eind_datum  = parse_ddmmyyyy_to_timestamp(x_tijdspad[1])
-    else:
-        start_datum = None
-        eind_datum  = None
-
-    tx_paths = tables.get("WOK_Player_Account_Transaction")
-    if not tx_paths:
-        return pd.DataFrame(columns=["Player_Profile_ID", "f51_median_seconds_loss_to_next_bet"])
-
-    NON_LOSS_TYPES = {"WINNING", "CASH_OUT"}
-
-    # Per player: list of (datetime, transaction_type) sorted by time
-    player_events: Dict[str, List] = {}
-
-    for df in iter_csv_chunks(
-        paths=tx_paths,
-        usecols=["Player_Profile_ID", "Transaction_Datetime", "Transaction_Type", "Transaction_Status"],
-        chunksize=chunksize,
-        verbose=verbose,
-    ):
-        if df.empty:
-            continue
-
-        status = df["Transaction_Status"].fillna("").astype(str).str.strip().str.upper()
-        df = df[df["Player_Profile_ID"].notna() & df["Transaction_Type"].notna() & status.eq("SUCCESSFUL")]
-        if df.empty:
-            continue
-
-        ts = pd.to_datetime(df["Transaction_Datetime"], errors="coerce", utc=True).dt.tz_localize(None)
-        df = df.loc[ts.notna()].copy()
-        ts = ts.loc[df.index]
-
-        if start_datum is not None:
-            mask = (ts >= start_datum) & (ts < eind_datum)
-            df = df.loc[mask]
-            ts = ts.loc[mask]
-
-        if df.empty:
-            continue
-
-        for pid, t, typ in zip(df["Player_Profile_ID"], ts, df["Transaction_Type"]):
-            player_events.setdefault(str(pid), []).append((t, str(typ).upper()))
-
-    # Compute deltas per player
-    records = []
-    for pid, events in player_events.items():
-        events.sort(key=lambda x: x[0])
-
-        stakes = [(t, i) for i, (t, typ) in enumerate(events) if typ == "STAKE"]
-        if len(stakes) < 2:
-            records.append({"Player_Profile_ID": pid, "f51_median_seconds_loss_to_next_bet": np.nan})
-            continue
-
-        deltas = []
-        for k in range(len(stakes) - 1):
-            t_stake, idx_stake = stakes[k]
-            t_next,  idx_next  = stakes[k + 1]
-
-            # Check if any non-loss event occurred between the two STAKEs
-            between = [typ for t, typ in events[idx_stake + 1:idx_next] if typ in NON_LOSS_TYPES]
-            if not between:
-                deltas.append((t_next - t_stake).total_seconds())
-
-        med = float(np.median(deltas)) if deltas else np.nan
-        records.append({"Player_Profile_ID": pid, "f51_median_seconds_loss_to_next_bet": med})
-
-    out = pd.DataFrame.from_records(records) if records else pd.DataFrame(
-        columns=["Player_Profile_ID", "f51_median_seconds_loss_to_next_bet"]
-    )
-
-    if logger:
-        logger.info(f"✅ F51 klaar: {len(out):,} spelers")
-        if len(out) > 0:
-            na = out["f51_median_seconds_loss_to_next_bet"].isna().sum()
-            logger.info(f"   N/A (geen verloren bets): {na:,}")
-
-    return out
+    logger = _setup_feature_logger(log_path, "f51_median_seconds_loss_to_next_bet") if log_path else None
+    return median_loss_to_next_bet(tables, x_tijdspad=x_tijdspad, chunksize=chunksize,
+                                   verbose=verbose, logger=logger)
 
 
 # ------------------------------
@@ -9973,12 +9884,13 @@ FEATURES_REGISTRY = {
     },
     "f51_median_seconds_loss_to_next_bet": {
         "stream_fn": f51_median_seconds_loss_to_next_bet,
-        "tables": ["WOK_Player_Account_Transaction"],
+        "tables": ["WOK_Bet", "WOK_Bet_Transaction", "WOK_Player_Account_Transaction"],
         "usecols": {
+            "WOK_Bet": ["pk_id", "Bet_ID", "Bet_Start_Datetime", "Bet_Status", "Extraction_Date", "Operator_ID"],
+            "WOK_Bet_Transaction": ["wok_bet_pk_id", "player_profile_id", "transactions_id"],
             "WOK_Player_Account_Transaction": [
-                "Player_Profile_ID",
-                "Transaction_Datetime",
-                "Transaction_Type",
+                "Player_Profile_ID", "Transaction_ID", "Transaction_Datetime", "Transaction_Type",
+                "Transaction_Status", "Transaction_Amount", "Operator_ID",
             ],
         },
         "log_name": "f51_median_seconds_loss_to_next_bet.log",

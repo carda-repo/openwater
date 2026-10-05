@@ -221,9 +221,16 @@ poetry run python run_pipeline.py --help
   original stakes and placement hours. Refunds after the exclusive window end are ignored.
   Their chunked calculation is shared per window; reference maps and aggregate sums remain
   in memory. Missing refund links or zero net stakes produce missing shares. F48 excludes
-  cancelled bets and bets with successful `VOID_BET` from both counts. F51 includes intervals
-  with `VOID_BET`; successful wins/cash-outs still exclude an interval. F51 remains a
-  stake-to-stake timing proxy. Undefined results stay missing in the output CSV.
+  cancelled bets and bets with successful `VOID_BET` from both counts. F51 combines bet
+  updates by operator/Bet_ID and measures from settlement to the next bet with a successful
+  stake. Only settled bets without their own positive winnings/cash-outs qualify as losses;
+  the first settled `Extraction_Date` approximates resolution time. `VOID_BET` also qualifies
+  by project choice, using the refund timestamp. Both closure and next placement must be in
+  the feature window; earlier transaction history is used for outcomes. The linked history
+  must be complete to establish that no prize was paid. F51 scans each of
+  its three tables once and retains reference indexes and per-bet state, not event rows.
+  Historical settled reports are needed: a later final export alone cannot recover earlier
+  resolution times. Undefined results stay missing in the output CSV.
 
 ---
 
@@ -492,9 +499,17 @@ poetry run python run_pipeline.py --help
   tellen niet mee. De chunkgewijze berekening wordt per venster gedeeld; koppelingsindexen en
   sommen blijven in het geheugen. Ontbrekende terugbetalingskoppelingen of netto-inzet nul
   geven een onbekend aandeel. F48 sluit geannuleerde bets en bets met succesvolle `VOID_BET`
-  uit van teller en noemer. F51 telt intervallen met `VOID_BET` mee; succesvolle prijzen en
-  cash-outs sluiten een interval nog steeds uit. F51 meet nog steeds van inzet tot volgende
-  inzet. Niet-berekenbare uitkomsten blijven onbekend in het uiteindelijke CSV-bestand.
+  uit van teller en noemer. F51 combineert betupdates op aanbieder/Bet_ID en meet vanaf
+  afwikkeling tot de volgende bet met een succesvolle inzet. Alleen afgewikkelde bets zonder
+  eigen positieve prijzen/cash-outs tellen als verlies; de eerste afgewikkelde extractie
+  benadert het afwikkelmoment. `VOID_BET` telt volgens onze keuze ook mee, vanaf de
+  terugbetaling. Afwikkeling en volgende plaatsing moeten binnen het featurevenster vallen;
+  eerdere transacties bepalen mede de uitkomst. De gekoppelde historie moet volledig zijn
+  om vast te stellen dat geen prijs is betaald. F51 leest elk van zijn drie tabellen één
+  keer en bewaart koppelingsindexen en gegevens per bet, zonder transactiegebeurtenissen
+  te bufferen. Historische afgewikkelde rapportages zijn nodig: alleen een latere eindexport
+  levert de eerdere afwikkeltijden niet. Niet-berekenbare uitkomsten blijven onbekend in het
+  uiteindelijke CSV-bestand.
 
 ---
 

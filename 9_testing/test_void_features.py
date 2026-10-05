@@ -197,15 +197,22 @@ def test_cancelled_update_without_new_player_reference_still_excludes_bet(tmp_pa
 
 
 @pytest.mark.parametrize("kind,status,expected", [
-    ("VOID_BET", "SUCCESSFUL", 10800), ("VOID_STAKE", "SUCCESSFUL", 10800),
+    ("VOID_BET", "SUCCESSFUL", 7200), ("VOID_STAKE", "SUCCESSFUL", 7200),
     ("WINNING", "SUCCESSFUL", None), ("CASH_OUT", "SUCCESSFUL", None),
-    ("WINNING", "FAILED", 10800), ("CASH_OUT", "FAILED", 10800),
+    ("WINNING", "FAILED", 7200), ("CASH_OUT", "FAILED", 7200),
 ])
 def test_f51_void_interval_counts_but_successful_wins_and_cashouts_exclude_it(tmp_path, kind, status, expected):
     tables = {TX: _write(tmp_path, TX, [_tx("next", "12", -100),
                                      _tx("refund", "10", 100, kind, status=status),
                                      _tx("first", "09", -100),
                                      _tx("failed-stake", "11", -100, status="FAILED")])}
+    first = {**_bet("B1", "first", "BET_CANCELLED" if kind == "VOID_BET" else "BET_SETTLED"),
+             "Extraction_Date": "2026-01-10T10:00:00Z"}
+    next_bet = {**_bet("B2", "next", "BET_PLACED"), "Bet_Start_Datetime": "2026-01-10T12:00:00Z",
+                "Extraction_Date": "2026-01-10T12:00:00Z"}
+    tables["WOK_Bet"] = _write(tmp_path, "WOK_Bet", [first, next_bet])
+    tables["WOK_Bet_Transaction"] = _write(tmp_path, "WOK_Bet_Transaction", [
+        _bet_ref("B1", "first"), _bet_ref("B1", "refund"), _bet_ref("B2", "next")])
     result = fes.f51_median_seconds_loss_to_next_bet(tables, x_tijdspad=WINDOW, chunksize=1)
     value = _values(result, REBETS)["P1"]
     assert pd.isna(value) if expected is None else value == expected
