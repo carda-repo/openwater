@@ -184,7 +184,7 @@ your data has, it makes the right monthly buckets automatically.
 
 **Two flags for deviating data:**
 - `--ignore-eod-balance` — if your `WOK_Player_Profile` has no `player_profile_eod_balance` column
-  (features f26/f27/f28 then fall back instead of crashing).
+  (features f26/f27/f28 then remain missing instead of assuming an opening balance of zero).
 - `--also-inactives` — if the active filter filters everyone out (no status record before the cutoff
   in your data); then you skip the active filter.
 
@@ -209,6 +209,13 @@ poetry run python run_pipeline.py --help
   available history and the last such transaction in the feature period. Supply transaction
   history from before that period to recover the actual activation date. The period includes
   the entire end date; elapsed calendar days have a minimum of 1 and no upper limit.
+- **F26–F28 opening balances**: use the latest snapshot at/before the feature-window start,
+  or reconstruct from the earliest later snapshot within that window. Older snapshots are
+  advanced using the intervening transactions. The reconstruction is shared across the three
+  features and needs at most one extra chunked transaction scan, with state per player.
+  It requires complete, deduplicated movements between the snapshot and the start; the
+  snapshot timestamp is `Extraction_Date`, and transactions at that timestamp follow it.
+  Without a usable snapshot the features stay missing, including in the output CSV.
 
 ---
 
@@ -437,7 +444,7 @@ ook heeft, hij maakt automatisch de juiste maand-buckets.
 
 **Twee vlaggen voor afwijkende data:**
 - `--ignore-eod-balance` — als je `WOK_Player_Profile` géén `player_profile_eod_balance`-kolom
-  heeft (features f26/f27/f28 vallen dan terug i.p.v. te crashen).
+  heeft (features f26/f27/f28 blijven dan onbekend; er wordt geen beginsaldo van nul aangenomen).
 - `--also-inactives` — als de active-filter iedereen wegfiltert (geen statusrecord vóór de
   cutoff in je data); dan sla je het actief-filter over.
 
@@ -463,6 +470,14 @@ poetry run python run_pipeline.py --help
   beschikbare historie en de laatste daarvan binnen het featurevenster. Lever ook eerdere
   transactiehistorie aan om de echte activatiedatum te kunnen bepalen. De volledige einddatum
   telt mee; verstreken kalenderdagen hebben een minimum van 1 en geen bovengrens.
+- **Beginsaldi voor F26–F28**: gebruiken het laatste saldomoment op/vóór de start van het
+  featurevenster, of rekenen terug vanaf het eerste latere saldomoment binnen dat venster.
+  Bij oudere saldi worden ook de tussenliggende transacties verwerkt. De reconstructie wordt
+  gedeeld door de drie features en kost hooguit één extra chunkgewijze transactiedoorloop,
+  met gegevens per speler in het geheugen. Alle mutaties tussen het saldomoment en de start
+  moeten volledig en gededupliceerd zijn. Het saldotijdstip is `Extraction_Date`; transacties
+  exact op dat tijdstip volgen op het saldo. Zonder bruikbaar saldo blijven de features
+  onbekend, ook in het uiteindelijke CSV-bestand.
 
 ---
 

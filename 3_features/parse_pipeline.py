@@ -13,6 +13,7 @@ byte-identiek is aan `clean_and_parse.py --mode parse`); de clean-helft is hier 
 
 Input is een geschoonde (en bij voorkeur gesorteerde) map met WOK-CSV's — de output van
 stap 1 (en eventueel stap 2). Output is één features-CSV met één rij per `Player_Profile_ID`.
+F26–F28 delen een saldoreconstructie per venster; ontbrekende saldofeatures blijven NaN.
 
 Op Snellius liep dit per operator via `run_parse_only.sbatch` → `parse_runner.py`; op de organisatie
 wijs je gewoon één cleaned-map aan en draai je `run_features.py`.
@@ -27,6 +28,7 @@ import re
 
 # Lokale modules (liggen naast dit bestand in _organisatie_code/3_features/)
 from path_finding import load_tables_local
+from balance_reconstruction import reconstruct_start_balances
 from feature_engineering import FEATURES_REGISTRY
 from feature_engineering_spanish import FEATURES_REGISTRY as FEATURES_REGISTRY_SPANISH
 from feature_engineering_basis import FEATURES_REGISTRY as FEATURES_REGISTRY_BASIS
@@ -234,8 +236,15 @@ def newest_features_input_dir(parent_dir: str | Path) -> Optional[Path]:
 
 
 # -----------------------------------------------------------------------------
-# _safe_merge  (VERBATIM uit clean_and_parse.py)
+# _safe_merge (preserves unavailable balance features)
 # -----------------------------------------------------------------------------
+_BALANCE_FEATURE_COLUMNS = {
+    "f26_balance_drop_frequency",
+    "f27_deposits_after_below2_per_day",
+    "f28_median_seconds_below2_to_deposit",
+}
+
+
 def _safe_merge(left: Optional[pd.DataFrame], right: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
     if left is None:
         out = None if right is None else right.copy()
@@ -278,7 +287,11 @@ def _safe_merge(left: Optional[pd.DataFrame], right: Optional[pd.DataFrame]) -> 
     if out is None or out.empty:
         return out
     for col in out.columns:
-        if col != "Player_Profile_ID" and pd.api.types.is_numeric_dtype(out[col]):
+        if (
+            col != "Player_Profile_ID"
+            and col not in _BALANCE_FEATURE_COLUMNS
+            and pd.api.types.is_numeric_dtype(out[col])
+        ):
             out[col] = out[col].fillna(0)
     return out
 
@@ -303,7 +316,7 @@ def run_scenario(
 
     ignore_EOD_Balance: als de dataset geen `Player_Profile_EOD_Balance` heeft, krijgen
     de features die die kolom lezen (f26/f27/f28) `WOK_Player_Profile` niet aangereikt →
-    ze vallen terug op hun ruwere pad (zonder EOD-prefilter) i.p.v. te crashen.
+    de saldoafhankelijke features blijven dan onbekend i.p.v. te crashen.
     """
     if scenario_name not in SCENARIOS:
         raise ValueError(f"Onbekend scenario ‘{scenario_name}’. Kies uit {list(SCENARIOS)}")
@@ -363,6 +376,8 @@ def run_scenario(
     features_df: Optional[pd.DataFrame] = None
     logs_dir = Path(base_dir) / "logs"
     logs_dir.mkdir(exist_ok=True)
+    # Run-scoped cache: share one reconstruction across F26/F27/F28 for each window.
+    opening_balance_cache = {}
 
     for key in feature_keys:
         print(f"\n🔨 Verwerken feature: {key}")
@@ -400,12 +415,21 @@ def run_scenario(
             print(f"   🔧 Override y_tijdspad vanuit CLI: {kwargs['y_tijdspad']}")
 
         # ignore_EOD_Balance: features die Player_Profile_EOD_Balance lezen (f26/f27/f28)
-        # krijgen WOK_Player_Profile niet aangereikt → hun ingebouwde fallback (geen
-        # EOD-prefilter) i.p.v. een crash op een dataset zonder die kolom.
+        # krijgen WOK_Player_Profile niet aangereikt → onbekende saldofeatures
+        # i.p.v. een crash op een dataset zonder die kolom.
         feat_tables = tables
         if ignore_EOD_Balance and "Player_Profile_EOD_Balance" in spec.get("usecols", {}).get("WOK_Player_Profile", []):
             feat_tables = {k: v for k, v in tables.items() if k != "WOK_Player_Profile"}
-            print(f"   ⏭️  ignore_EOD_Balance: WOK_Player_Profile niet aangereikt aan '{key}' (geen EOD-prefilter).")
+            print(f"   ⏭️  ignore_EOD_Balance: WOK_Player_Profile niet aangereikt aan '{key}' (saldo onbekend).")
+
+        if "start_balances" in sig.parameters:
+            window = kwargs.get("x_tijdspad")
+            cache_key = (tuple(window) if window else None, ignore_EOD_Balance)
+            if cache_key not in opening_balance_cache:
+                opening_balance_cache[cache_key] = reconstruct_start_balances(
+                    feat_tables, x_tijdspad=window, chunksize=chunksize, verbose=verbose,
+                )
+            kwargs["start_balances"] = opening_balance_cache[cache_key]
 
         f = stream_fn(
             tables=feat_tables,
@@ -452,7 +476,7 @@ def build_features(
     Bouw de features voor `scenario` op basis van de geschoonde CSV's in `cleaned_dir`.
 
     ignore_EOD_Balance: zet aan als je dataset geen `Player_Profile_EOD_Balance` heeft —
-    f26/f27/f28 vallen dan terug op hun ruwere pad i.p.v. te crashen (zie run_scenario).
+    f26/f27/f28 blijven dan onbekend i.p.v. te crashen (zie run_scenario).
 
     Spiegelt exact de parse-branch van `clean_and_parse.py --mode parse`: feature-
     berekening via `run_scenario`, dedup op `Player_Profile_ID`, optionele ALL-aggregatie,

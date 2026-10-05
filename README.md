@@ -89,7 +89,7 @@ python run_pipeline.py --data-dir ... --out-dir ... --base-scenario Flexible_spa
 ```
 
 If your dataset lacks `Player_Profile_EOD_Balance` (like the minimal organisation set), add
-`--ignore-eod-balance` (f26/f27/f28 then fall back instead of crashing).
+`--ignore-eod-balance` (f26/f27/f28 then remain missing instead of crashing or assuming a zero opening balance).
 
 Or from Python (all parameters have **explicit defaults** + explanation in the docstring):
 
@@ -817,7 +817,7 @@ python run_pipeline.py --data-dir ... --out-dir ... --base-scenario Flexible_spa
 ```
 
 Mist je dataset `Player_Profile_EOD_Balance` (zoals de minimale organisatie-set), voeg dan
-`--ignore-eod-balance` toe (f26/f27/f28 vallen dan terug i.p.v. te crashen).
+`--ignore-eod-balance` toe (f26/f27/f28 blijven dan onbekend; er wordt geen beginsaldo van nul aangenomen).
 
 Of vanuit Python (alle parameters hebben **expliciete defaults** + uitleg in de docstring):
 

@@ -5,8 +5,8 @@ Test voor de `ignore_EOD_Balance`-flag.
 
 Op een dataset zónder `Player_Profile_EOD_Balance` lezen f26/f27/f28 die kolom hardcoded
 en crasht `Flexible_spanish_plus` (pandas: "Usecols do not match columns"). Met de flag
-krijgen die features `WOK_Player_Profile` niet aangereikt → ze vallen terug op hun ruwere
-pad en de pijplijn loopt door.
+krijgen die features `WOK_Player_Profile` niet aangereikt → de saldofeatures blijven
+onbekend en de pijplijn loopt door.
 
 Draaien:
     pytest _organisatie_code/9_testing/test_ignore_eod_balance.py -q
@@ -67,7 +67,7 @@ def test_without_flag_crashes_on_missing_eod():
 
 
 def test_with_flag_runs_and_keeps_eod_features():
-    """Met de flag loopt plus door en blijven f26/f27/f28 als kolommen aanwezig (ruwer pad)."""
+    """Met de flag loopt plus door en blijven f26/f27/f28 als onbekende kolommen aanwezig."""
     tmp, cleaned = _clean_without_eod()
     try:
         df = build_features(cleaned_dir=cleaned, scenario="Flexible_spanish_plus",
@@ -76,6 +76,7 @@ def test_with_flag_runs_and_keeps_eod_features():
         assert len(df) >= 1
         for feat in EOD_FEATURES:
             assert feat in df.columns, f"{feat} ontbreekt — fallback zou de kolom moeten leveren"
+            assert df[feat].isna().all(), f"{feat}: een ontbrekend saldo mag geen 0 opleveren"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
