@@ -30,7 +30,7 @@ def _timestamps(values):
 class _Bet:
     placed: object = None
     first_settled: object = None
-    latest_status: str = ""
+    latest_status: str | None = ""
     latest_status_at: object = None
 
 
@@ -54,6 +54,9 @@ def median_loss_to_next_bet(tables, *, x_tijdspad=None, chunksize=200_000, verbo
     exclude their own bet, irrespective of other bets placed in the meantime.
 
     Regular losses require final observed status BET_SETTLED and a successful stake.
+    Conflicting final statuses at the latest Extraction_Date leave regular losses
+    unknown. A strictly newer status can resolve that ambiguity. VOID_BET refunds
+    remain independent evidence of closure.
     The first settled Extraction_Date is a proxy, not an exact resolution timestamp.
     VOID_BET is included by project choice: its successful positive refund closes
     the interval at Transaction_Datetime, independently of the reported bet status.
@@ -97,8 +100,11 @@ def median_loss_to_next_bet(tables, *, x_tijdspad=None, chunksize=200_000, verbo
             # A future version may supply a parent link/placement, never a past outcome.
             if pd.isna(extraction) or (end is not None and extraction >= end):
                 continue
-            if bet.latest_status_at is None or extraction >= bet.latest_status_at:
+            if bet.latest_status_at is None or extraction > bet.latest_status_at:
                 bet.latest_status, bet.latest_status_at = status, extraction
+            elif extraction == bet.latest_status_at and status != bet.latest_status:
+                # Equal extraction times cannot establish which status is newer.
+                bet.latest_status = None
             if status in settled_statuses:
                 if bet.first_settled is None or extraction < bet.first_settled:
                     bet.first_settled = extraction

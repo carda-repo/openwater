@@ -222,6 +222,18 @@ poetry run python run_pipeline.py --help
   It requires complete, deduplicated movements between the snapshot and the start; the
   snapshot timestamp is `Extraction_Date`, and transactions at that timestamp follow it.
   Without a usable snapshot the features stay missing, including in the output CSV.
+- **Equal timestamps (F25/F26–F28/F51)**: F26–F28 apply all successful movements of a
+  player at the same UTC timestamp together. Drops compare the balance before and after
+  that moment; deposits at that moment do not count as subsequent deposits. F27 counts
+  each deposit at a later eligible moment, F28 measures until that moment once. Transactions
+  must be chronological per player across files; backward timestamps make that player's
+  balance features unknown. Processing retains one unfinished group per player, rather than
+  full transaction histories. F25 chooses the latest in-window extraction per modification
+  time and retains one record per distinct modification. Conflicting statuses at that
+  extraction leave F25 unknown. Conflicting balances at the selected snapshot leave the
+  opening balance unknown. Conflicting final bet statuses at the latest extraction leave
+  ordinary F51 losses unknown; a newer status can resolve that conflict. VOID_BET refund
+  evidence remains independent. These rules also apply across chunk and file boundaries.
 - **Void rules for F44/F45/F48/F51**: F44/F45 use stakes net of successful
   `VOID_BET`/`VOID_STAKE` refunds, allocated proportionally to the linked bet/session's
   original stakes and placement hours. Refunds after the exclusive window end are ignored.
@@ -505,6 +517,19 @@ poetry run python run_pipeline.py --help
   moeten volledig en gededupliceerd zijn. Het saldotijdstip is `Extraction_Date`; transacties
   exact op dat tijdstip volgen op het saldo. Zonder bruikbaar saldo blijven de features
   onbekend, ook in het uiteindelijke CSV-bestand.
+- **Gelijke tijdstippen (F25/F26–F28/F51)**: F26–F28 verwerken alle succesvolle mutaties
+  van een speler op hetzelfde UTC-tijdstip samen. Een daling wordt bepaald tussen het saldo
+  vóór en ná dat moment; stortingen op dat moment gelden niet als latere stortingen. F27
+  telt iedere storting op een later geschikt moment, F28 meet één interval tot dat moment.
+  Transacties moeten per speler chronologisch staan, ook over bestanden heen. Een tijdstip
+  dat terugloopt maakt diens saldofeatures onbekend. Alleen de onafgeronde groep per speler
+  blijft in het geheugen, zonder volledige transactiehistorie. F25 kiest per wijzigingstijd
+  de nieuwste extractie binnen het venster en bewaart één record per unieke wijzigingstijd.
+  Tegenstrijdige statussen op die extractietijd maken F25 onbekend. Tegenstrijdige saldi op
+  het gekozen saldomoment maken het beginsaldo onbekend. Tegenstrijdige laatste betstatussen
+  op dezelfde extractietijd maken gewone F51-verliezen onbekend; een nieuwere status kan
+  dat oplossen. Een VOID_BET-terugbetaling blijft onafhankelijk bewijs. Deze regels gelden
+  ook over chunk- en bestandsgrenzen.
 - **Voidregels voor F44/F45/F48/F51**: F44/F45 verrekenen succesvolle
   `VOID_BET`/`VOID_STAKE` naar verhouding met de oorspronkelijke inzetten van de gekoppelde
   weddenschap/spelsessie en hun inzettijdstippen. Terugbetalingen na de exclusieve einddatum

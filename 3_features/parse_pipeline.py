@@ -240,6 +240,7 @@ def newest_features_input_dir(parent_dir: str | Path) -> Optional[Path]:
 # _safe_merge (preserves undefined balance and corrected void features)
 # -----------------------------------------------------------------------------
 _UNKNOWN_FEATURE_COLUMNS = {
+    "f25_voluntary_suspensions",
     "f26_balance_drop_frequency",
     "f27_deposits_after_below2_per_day",
     "f28_median_seconds_below2_to_deposit",

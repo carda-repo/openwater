@@ -59,13 +59,19 @@ def reconstruct_start_balances(
             if subset.empty:
                 continue
             grouped = subset.groupby("pid")["ts"]
-            indices = grouped.idxmax() if latest else grouped.idxmin()
-            for pid, ts, bal in subset.loc[indices, ["pid", "ts", "bal"]].itertuples(index=False, name=None):
+            chosen = grouped.transform("max" if latest else "min")
+            candidates = subset[subset["ts"].eq(chosen)]
+            for (pid, ts), values in candidates.groupby(["pid", "ts"])["bal"]:
+                bal = float(values.iloc[0]) if values.nunique() == 1 else None
                 previous = target.get(pid)
                 if previous is None or (ts > previous[0] if latest else ts < previous[0]):
-                    target[pid] = (ts, float(bal))
+                    target[pid] = (ts, bal)
+                elif ts == previous[0] and bal != previous[1]:
+                    target[pid] = (ts, None)
 
     anchors = {**after, **before}
+    # A conflicting chosen anchor is unknown; do not silently pick an older one.
+    anchors = {pid: anchor for pid, anchor in anchors.items() if anchor[1] is not None}
     balances = {pid: bal for pid, (ts, bal) in anchors.items() if start is not None and ts == start}
     bridge = {pid: ts for pid, (ts, _) in anchors.items() if pid not in balances}
     if not bridge:

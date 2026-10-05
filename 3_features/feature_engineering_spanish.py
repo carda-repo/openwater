@@ -284,6 +284,7 @@ import pandas as pd
 import numpy as np
 from path_finding import iter_csv_chunks
 from balance_reconstruction import reconstruct_start_balances
+from balance_moments import balance_events
 from stake_time_shares import net_stake_time_shares
 from bet_loss_intervals import median_loss_to_next_bet
 from local_time import local_time, local_date
@@ -3594,10 +3595,12 @@ def f25_voluntary_suspensions(
     Interpretation (pragmatic, consistent with CDB/WOK tables):
       - Count voluntary suspensions from WOK_Player_Profile by counting transitions/records
         where Player_Profile_Status indicates a voluntary suspension state.
-      - We dedupe consecutive identical statuses so repeated daily snapshots don't inflate counts.
+      - For each modification time choose the latest in-window Extraction_Date.
+      - Conflicting statuses at that latest extraction make the count unknown.
+      - Consecutive identical statuses do not count as new suspensions.
 
     Output:
-      - f25_voluntary_suspensions: non-negative integer
+      - f25_voluntary_suspensions: non-negative count, or NaN for ambiguous history
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f25_voluntary_suspensions")
@@ -3621,73 +3624,65 @@ def f25_voluntary_suspensions(
             logger.warning("⚠️ WOK_Player_Profile niet beschikbaar")
         return pd.DataFrame(columns=["Player_Profile_ID", "f25_voluntary_suspensions"])
 
-    # Heuristic list of status values that likely represent voluntary suspensions.
-    # If your data uses different codes, extend this list.
-    VOLUNTARY_STATUS = {
-        "SELF_EXCLUDED_TEMP",
-        "SELF_EXCLUDED_INDEF"
-    }
-
-    # We count status "events" per player by tracking changes over time.
-    # If Player_Profile_Modified is present, use it to order states.
-    events_per_player: Dict[str, int] = {}
-    last_status_per_player: Dict[str, str] = {}
-
+    voluntary = {"SELF_EXCLUDED_TEMP", "SELF_EXCLUDED_INDEF"}
+    # One compact record per actual modification, rather than per daily snapshot.
+    # This also supports profile files arriving out of chronological order.
+    events = {}
+    unknown_players = set()
+    players = set()
     for df in iter_csv_chunks(
         paths=profile_paths,
-        usecols=["Player_Profile_ID", "Player_Profile_Status", "Player_Profile_Modified"],
-        chunksize=chunksize,
-        verbose=verbose,
+        usecols=["Player_Profile_ID", "Player_Profile_Status",
+                 "Player_Profile_Modified", "Extraction_Date"],
+        chunksize=chunksize, verbose=verbose,
     ):
-        df = df[df["Player_Profile_ID"].notna() & df["Player_Profile_Status"].notna()].copy()
-        if df.empty:
-            continue
-
-        # Parse modified timestamp if available, else keep original chunk order
-        ts = pd.to_datetime(df["Player_Profile_Modified"], errors="coerce", utc=True).dt.tz_localize(None)
-        df["__ts"] = ts
-
-        # Filter out rows beyond the right-side cutoff to prevent target leakage
-        if cutoff_ts is not None:
-            df = df[df["__ts"].isna() | (df["__ts"] < cutoff_ts)]
-            if df.empty:
+        modified = pd.to_datetime(df["Player_Profile_Modified"], errors="coerce",
+                                  utc=True, format="mixed").dt.tz_localize(None)
+        extracted = pd.to_datetime(df["Extraction_Date"], errors="coerce",
+                                   utc=True, format="mixed").dt.tz_localize(None)
+        for pid, status, ts, extraction in zip(df["Player_Profile_ID"],
+                df["Player_Profile_Status"], modified, extracted):
+            if pd.isna(pid) or not str(pid).strip():
                 continue
+            if cutoff_ts is not None and ((pd.notna(ts) and ts >= cutoff_ts)
+                    or (pd.notna(extraction) and extraction >= cutoff_ts)):
+                continue
+            pid = str(pid)
+            players.add(pid)
+            if pd.isna(ts) or pd.isna(status) or not str(status).strip():
+                unknown_players.add(pid)
+                continue
+            status = str(status).strip().upper()
+            # Missing extraction times have no demonstrated precedence. Equal
+            # missing times can agree; conflicting statuses remain unknown.
+            rank = extraction if pd.notna(extraction) else pd.Timestamp.min
+            key = (pid, ts)
+            previous = events.get(key)
+            if previous is None or rank > previous[0]:
+                events[key] = (rank, status)
+            elif rank == previous[0] and status != previous[1]:
+                events[key] = (rank, None)
 
-        # Sort within chunk by player then timestamp (NaT at end)
-        df["__pid"] = df["Player_Profile_ID"].astype(str)
-        df["__status"] = df["Player_Profile_Status"].astype(str)
-
-        df = df.sort_values(["__pid", "__ts"], na_position="last")
-
-        # Walk rows (chunk-sized; acceptable) tracking per-player status transitions
-        pid_col = df.columns.get_loc("__pid")
-        st_col = df.columns.get_loc("__status")
-
-        for i in range(len(df)):
-            pid = df.iat[i, pid_col]
-            status = df.iat[i, st_col]
-
-            prev = last_status_per_player.get(pid)
-            if prev == status:
-                continue  # dedupe consecutive identical snapshots
-
-            # status changed (or first seen)
-            last_status_per_player[pid] = status
-
-            if status in VOLUNTARY_STATUS:
-                events_per_player[pid] = events_per_player.get(pid, 0) + 1
-
-    if not events_per_player:
-        result = pd.DataFrame(columns=["Player_Profile_ID", "f25_voluntary_suspensions"])
-    else:
-        result = pd.DataFrame(
-            [{"Player_Profile_ID": pid, "f25_voluntary_suspensions": int(n)} for pid, n in events_per_player.items()]
-        )
-
+    by_player = {}
+    for (pid, ts), (_, status) in events.items():
+        by_player.setdefault(pid, []).append((ts, status))
+    records = []
+    for pid in sorted(players):
+        count = 0
+        previous = None
+        ambiguous = pid in unknown_players
+        for _, status in sorted(by_player.get(pid, [])):
+            if status is None:
+                ambiguous = True
+            elif status != previous and status in voluntary:
+                count += 1
+            previous = status
+        records.append({"Player_Profile_ID": pid,
+                        "f25_voluntary_suspensions": np.nan if ambiguous else count})
+    result = pd.DataFrame(records, columns=["Player_Profile_ID", "f25_voluntary_suspensions"])
     if logger:
-        logger.info(f"✅ F25 klaar: {len(result):,} spelers met ≥1 voluntary suspension event")
-        if len(result) > 0:
-            logger.info(f"   Totaal events: {int(result['f25_voluntary_suspensions'].sum()):,}")
+        logger.info(f"Completed F25: {len(result)} players, "
+                    f"{result['f25_voluntary_suspensions'].isna().sum()} unknown")
 
     return result
 
@@ -3706,181 +3701,35 @@ def f26_balance_drop_frequency(
     start_balances: Dict[str, float] | None = None,
     threshold: float = 2.0,
 ) -> pd.DataFrame:
+    """F26: observed balance moments; tied movements are applied together.
+
+    F26 counts drops per active day, F27 later deposits per active day and F28
+    the median seconds until the first later deposit. Deposits at the drop's
+    timestamp are not subsequent events. Unknown anchors or unsorted histories
+    remain NaN. Input must be sorted chronologically per player across files.
     """
-    F26: Balance Drop Frequency (per active day)
-
-    Spec-approx (best possible with available data):
-      - Reconstruct opening balance from a snapshot, then apply account transactions.
-      - Leave the feature unknown when no reliable opening balance is available.
-      - Count transitions where balance crosses from >= threshold to < threshold
-        **caused by a negative interaction** (delta < 0).
-      - Divide by F1 (active days) for the same reference period.
-
-    Notes:
-      - No '+1 day' logic. Period filter is [start, end).
-      - Enforces STAKE amounts as negative (one-time warning if coercion applied).
-      - Accepts snapshots at the start and reverses later snapshots when needed.
-      - Does not prefilter by EOD balance: intraday drops may recover before EOD.
-    """
-    if log_path:
-        logger = _setup_feature_logger(log_path, "f26_balance_drop_frequency")
-        logger.info("▶ START F26: Balance Drop Frequency (below EUR 2 per active day)")
-        if x_tijdspad:
-            logger.info(f"  Tijdsfiltering: {x_tijdspad[0]} - {x_tijdspad[1]} (no +1 logic)")
-    else:
-        logger = None
-
-    # --- tijdspad ---
-    if x_tijdspad:
-        start_datum = parse_ddmmyyyy_to_timestamp(x_tijdspad[0])
-        eind_datum = parse_ddmmyyyy_to_timestamp(x_tijdspad[1])
-    else:
-        start_datum = None
-        eind_datum = None
-
-    tx_paths = tables.get("WOK_Player_Account_Transaction")
-    if not tx_paths:
-        return pd.DataFrame(columns=["Player_Profile_ID", "f26_balance_drop_frequency"])
-
-    # Shared opening balances; no EOD prefilter (intraday dips can recover by EOD).
+    column = "f26_balance_drop_frequency"
+    f1 = f1_active_days(tables, x_tijdspad=x_tijdspad, chunksize=chunksize,
+                        log_path=None, verbose=verbose)
+    if f1.empty:
+        return pd.DataFrame(columns=["Player_Profile_ID", column])
     if start_balances is None:
         start_balances = reconstruct_start_balances(
-            tables, x_tijdspad=x_tijdspad, chunksize=chunksize, verbose=verbose,
-        )
-    if logger:
-        logger.info(f"  Reliable opening balances: {len(start_balances):,} players")
-
-    # ------------------------------------------------------------------
-    # B) Build F1 denominator (active days) for the same period
-    # ------------------------------------------------------------------
-    f1 = f1_active_days(
-        tables,
-        x_tijdspad=x_tijdspad,
-        chunksize=chunksize,
-        log_path=None,
-        verbose=verbose,
-    )
-    if f1.empty:
-        if logger:
-            logger.warning("⚠️ F1 is leeg; F26 kan niet worden berekend.")
-        return pd.DataFrame(columns=["Player_Profile_ID", "f26_balance_drop_frequency"])
-
-    f1_dict = {str(pid): days for pid, days in f1.set_index("Player_Profile_ID")["f1_active_days"].items()}
-
-    if not start_balances:
-        return pd.DataFrame({"Player_Profile_ID": list(f1_dict), "f26_balance_drop_frequency": np.nan})
-
-    # ------------------------------------------------------------------
-    # C) Collect & compute for players with known opening balances
-    # ------------------------------------------------------------------
-    # Keep the existing per-player chronological sort for event detection.
-    tx_buffer: Dict[str, List[Tuple[pd.Timestamp, float, str]]] = {}  # pid -> [(ts, amount, type), ...]
-
-    stake_coercion_warned = False
-
-    need_cols = ["Player_Profile_ID", "Transaction_Datetime", "Transaction_Amount", "Transaction_Type", "Transaction_Status"]
-    for df in iter_csv_chunks(
-        paths=tx_paths,
-        usecols=need_cols,
-        chunksize=chunksize,
-        verbose=verbose,
-    ):
-        df = df[df["Player_Profile_ID"].notna()].copy()
-        df = df[df["Player_Profile_ID"].astype(str).isin(start_balances)]
-        if df.empty:
-            continue
-
-        # only successful tx (you can broaden later if spec says otherwise)
-        if "Transaction_Status" in df.columns:
-            df = df[df["Transaction_Status"] == "SUCCESSFUL"]
-            if df.empty:
-                continue
-
-        ts = pd.to_datetime(df["Transaction_Datetime"], errors="coerce", utc=True, format="mixed").dt.tz_localize(None)
-        df["ts"] = ts
-        df = df[df["ts"].notna()].copy()
-        if df.empty:
-            continue
-
-        if start_datum is not None:
-            mask = (df["ts"] >= start_datum) & (df["ts"] < eind_datum)
-            if not mask.any():
-                continue
-            df = df.loc[mask].copy()
-
-        amt = pd.to_numeric(df["Transaction_Amount"], errors="coerce")
-        df["amt"] = amt
-        df = df[np.isfinite(df["amt"])].copy()
-        if df.empty:
-            continue
-
-        # enforce STAKE negative (one-time warning)
-        is_stake = df["Transaction_Type"] == "STAKE"
-        if is_stake.any():
-            pos_stake = is_stake & (df["amt"] > 0)
-            if pos_stake.any():
-                df.loc[pos_stake, "amt"] = -df.loc[pos_stake, "amt"].abs()
-                if (not stake_coercion_warned) and logger:
-                    logger.warning("⚠️ Coerced positive STAKE amounts to negative (one-time warning).")
-                stake_coercion_warned = True
-
-        # buffer
-        for row in df.itertuples(index=False):
-            pid = str(getattr(row, "Player_Profile_ID"))
-            t = getattr(row, "ts")
-            a = float(getattr(row, "amt"))
-            typ = str(getattr(row, "Transaction_Type"))
-            tx_buffer.setdefault(pid, []).append((t, a, typ))
-
-    # compute drops
-    drop_counts: Dict[str, int] = {}
-    for pid, txs in tx_buffer.items():
-        if not txs:
-            drop_counts[pid] = 0
-            continue
-
-        # sort by timestamp (stable)
-        txs.sort(key=lambda x: x[0])
-
-        bal = start_balances[pid]
-
-        cnt = 0
-        for t, delta, typ in txs:
-            before = bal
-            after = before + delta
-
-            # "pak alle negatieve interactions mee"
-            if delta < 0 and before >= threshold and after < threshold:
-                cnt += 1
-
-            bal = after
-
-        drop_counts[pid] = cnt
-
-    # ------------------------------------------------------------------
-    # D) Divide by F1
-    # ------------------------------------------------------------------
+            tables, x_tijdspad=x_tijdspad, chunksize=chunksize, verbose=verbose)
+    states = balance_events(tables, start_balances, x_tijdspad=x_tijdspad,
+                            chunksize=chunksize, verbose=verbose, threshold=threshold) if start_balances else {}
     records = []
-    # Preserve active players, including those with unknown opening balances.
-    all_players = set(f1_dict.keys()) | set(drop_counts.keys())
-
-    for pid in all_players:
-        drops = drop_counts.get(pid, 0)
-        active_days = f1_dict.get(pid, 0)
-        if pid not in start_balances:
-            per_day = np.nan
-        else:
-            per_day = drops / active_days if active_days > 0 else (0.0 if drops == 0 else np.nan)
-        records.append({"Player_Profile_ID": pid, "f26_balance_drop_frequency": per_day})
-
-    result = pd.DataFrame.from_records(records)
-
-    if logger:
-        logger.info(f"✅ F26 klaar: {len(result):,} spelers")
-        valid = result["f26_balance_drop_frequency"].dropna()
-        if len(valid) > 0:
-            logger.info(f"   Mean (non-NaN): {valid.mean():.4f}")
-
+    for pid, days in f1[["Player_Profile_ID", "f1_active_days"]].itertuples(index=False, name=None):
+        pid = str(pid)
+        state = states.get(pid)
+        value = np.nan
+        if state is not None and not state.unknown:
+            value = state.drops / days if days > 0 else np.nan
+        records.append({"Player_Profile_ID": pid, column: value})
+    result = pd.DataFrame(records)
+    if log_path:
+        logger = _setup_feature_logger(log_path, column)
+        logger.info(f"Completed {column}: {len(result)} players, {result[column].isna().sum()} unknown")
     return result
 
 
@@ -3898,176 +3747,37 @@ def f27_deposits_after_balance_below_2_per_day(
     verbose: bool = False,
     start_balances: Dict[str, float] | None = None,
 ) -> pd.DataFrame:
+    """F27: observed balance moments; tied movements are applied together.
+
+    F26 counts drops per active day, F27 later deposits per active day and F28
+    the median seconds until the first later deposit. Deposits at the drop's
+    timestamp are not subsequent events. Unknown anchors or unsorted histories
+    remain NaN. Input must be sorted chronologically per player across files.
     """
-    F27:
-    Number of times that, after the balance has fallen below EUR 2,
-    the player makes a deposit, divided by F1.
-
-    Output:
-      - f27_deposits_after_below2_per_day: float (>=0) or NaN if never below 2.
-
-    Notes:
-      - No '+1 day' logic. Filter is [start, end).
-      - Uses a shared, snapshot-based opening balance; unknown stays NaN.
-      - Includes ALL negative interactions (any tx with amount < 0).
-      - Requires chronological processing per player. Assumes input is roughly chronological
-        per file; if not, you need a pre-sort step.
-    """
-    if log_path:
-        logger = _setup_feature_logger(log_path, "f27_deposits_after_balance_below_2_per_day")
-        logger.info("▶ START F27: Deposits after balance < 2 (per active day)")
-        if x_tijdspad:
-            logger.info(f"  Tijdsfiltering: {x_tijdspad[0]} - {x_tijdspad[1]} (no +1 logic)")
-    else:
-        logger = None
-
-    # ---- tijdspad ----
-    if x_tijdspad:
-        start_datum = parse_ddmmyyyy_to_timestamp(x_tijdspad[0])
-        eind_datum  = parse_ddmmyyyy_to_timestamp(x_tijdspad[1])
-    else:
-        start_datum = None
-        eind_datum  = None
-
-    # ---- F1 (denominator) ----
-    f1 = f1_active_days(tables, x_tijdspad=x_tijdspad, chunksize=chunksize, log_path=None, verbose=verbose)
+    column = "f27_deposits_after_below2_per_day"
+    f1 = f1_active_days(tables, x_tijdspad=x_tijdspad, chunksize=chunksize,
+                        log_path=None, verbose=verbose)
     if f1.empty:
-        return pd.DataFrame(columns=["Player_Profile_ID", "f27_deposits_after_below2_per_day"])
-
-    f1_dict = {str(pid): days for pid, days in f1.set_index("Player_Profile_ID")["f1_active_days"].items()}
-
+        return pd.DataFrame(columns=["Player_Profile_ID", column])
     if start_balances is None:
         start_balances = reconstruct_start_balances(
-            tables, x_tijdspad=x_tijdspad, chunksize=chunksize, verbose=verbose,
-        )
-    if logger:
-        logger.info(f"  Reliable opening balances: {len(start_balances):,} players")
-
-    if not start_balances:
-        return pd.DataFrame({"Player_Profile_ID": list(f1_dict), "f27_deposits_after_below2_per_day": np.nan})
-
-    # ---- numerator counting via running balance ----
-    tx_paths = tables.get("WOK_Player_Account_Transaction")
-    if not tx_paths:
-        return pd.DataFrame(columns=["Player_Profile_ID", "f27_deposits_after_below2_per_day"])
-
-    # Running state
-    running_balance: Dict[str, float] = {}        # pid -> current balance
-    ever_below2: Dict[str, bool] = {}             # pid -> ever crossed/been <2 after a debit
-    deposits_after_below2: Dict[str, int] = {}    # pid -> count
-
-    threshold = 2.0
-
-    # one-time warning on STAKE coercion (optional – you said you want this once)
-    coerced_stake_warned = False
-
-    for df in iter_csv_chunks(
-        paths=tx_paths,
-        usecols=[
-            "Player_Profile_ID",
-            "Transaction_Datetime",
-            "Transaction_Amount",
-            "Transaction_Type",
-            "Transaction_Status",
-        ],
-        chunksize=chunksize,
-        verbose=verbose,
-    ):
-        df = df[df["Player_Profile_ID"].notna()].copy()
-        df = df[df["Player_Profile_ID"].astype(str).isin(start_balances)]
-        if df.empty:
-            continue
-
-        # Successful only (otherwise balance effects are ambiguous)
-        df = df[df["Transaction_Status"] == "SUCCESSFUL"]
-        if df.empty:
-            continue
-
-        ts = pd.to_datetime(df["Transaction_Datetime"], errors="coerce", utc=True, format="mixed").dt.tz_localize(None)
-        df["ts"] = ts
-        df = df[df["ts"].notna()]
-        if df.empty:
-            continue
-
-        if start_datum is not None:
-            mask = (df["ts"] >= start_datum) & (df["ts"] < eind_datum)
-            if not mask.any():
-                continue
-            df = df.loc[mask].copy()
-
-        df["amount"] = pd.to_numeric(df["Transaction_Amount"], errors="coerce")
-        df = df[np.isfinite(df["amount"])]
-        if df.empty:
-            continue
-
-        # Enforce STAKE as negative (if not already) — per your project convention
-        is_stake = df["Transaction_Type"].astype(str).eq("STAKE")
-        # identify stake that is positive -> flip
-        to_flip = is_stake & (df["amount"] > 0)
-        if to_flip.any():
-            df.loc[to_flip, "amount"] = -df.loc[to_flip, "amount"]
-            if (not coerced_stake_warned) and logger:
-                logger.warning("⚠️ Coerced positive STAKE amounts to negative (one-time warning).")
-            coerced_stake_warned = True
-
-        # Sort inside chunk by (pid, ts) to reduce damage
-        df = df.sort_values(["Player_Profile_ID", "ts"])
-
-        # Process row-wise (stateful)
-        pid_col = df.columns.get_loc("Player_Profile_ID")
-        ts_col  = df.columns.get_loc("ts")
-        amt_col = df.columns.get_loc("amount")
-        typ_col = df.columns.get_loc("Transaction_Type")
-
-        for i in range(len(df)):
-            pid = str(df.iat[i, pid_col])
-            amt = float(df.iat[i, amt_col])
-            typ = str(df.iat[i, typ_col])
-
-            # init running balance for this pid
-            if pid not in running_balance:
-                running_balance[pid] = start_balances[pid]
-                ever_below2.setdefault(pid, False)
-                deposits_after_below2.setdefault(pid, 0)
-
-            bal_before = running_balance[pid]
-
-            # Apply transaction to balance
-            bal_after = bal_before + amt
-            running_balance[pid] = bal_after
-
-            # If this is a debit (any negative interaction), and it pushed/kept us below 2, mark ever_below2
-            if amt < 0:
-                # spec-style: we care about "after a negative interaction"
-                if (bal_before >= threshold) and (bal_after < threshold):
-                    ever_below2[pid] = True
-                # also: if already <2, we keep it True once it ever happened
-                # (no action needed)
-
-            # Count deposits that happen while balance <2 (before deposit), but only if ever_below2 True
-            if typ == "DEPOSIT" and ever_below2.get(pid, False):
-                if bal_before < threshold:
-                    deposits_after_below2[pid] += 1
-
-    # ---- build output anchored on F1 players ----
+            tables, x_tijdspad=x_tijdspad, chunksize=chunksize, verbose=verbose)
+    states = balance_events(tables, start_balances, x_tijdspad=x_tijdspad,
+                            chunksize=chunksize, verbose=verbose) if start_balances else {}
     records = []
-    for pid, active_days in f1_dict.items():
-        below = ever_below2.get(pid, False)
-        if not below:
-            per_day = np.nan  # N/A if never below 2
-        else:
-            n = deposits_after_below2.get(pid, 0)
-            per_day = (n / active_days) if (active_days and active_days > 0) else np.nan
-        records.append({"Player_Profile_ID": pid, "f27_deposits_after_below2_per_day": per_day})
-
-    out = pd.DataFrame.from_records(records)
-
-    if logger:
-        logger.info(f"✅ F27 klaar: {len(out):,} spelers (anchored on F1)")
-        na = out["f27_deposits_after_below2_per_day"].isna().sum()
-        logger.info(f"   N/A (unknown opening balance or never below 2): {na:,}")
-
-    return out
+    for pid, days in f1[["Player_Profile_ID", "f1_active_days"]].itertuples(index=False, name=None):
+        pid = str(pid)
+        state = states.get(pid)
+        value = np.nan
+        if state is not None and not state.unknown:
+            if state.drops and days > 0:
+                value = state.deposits / days
+        records.append({"Player_Profile_ID": pid, column: value})
+    result = pd.DataFrame(records)
+    if log_path:
+        logger = _setup_feature_logger(log_path, column)
+        logger.info(f"Completed {column}: {len(result)} players, {result[column].isna().sum()} unknown")
+    return result
 
 
 # ------------------------------
@@ -4083,185 +3793,38 @@ def f28_median_seconds_below2_to_deposit(
     verbose: bool = False,
     start_balances: Dict[str, float] | None = None,
 ) -> pd.DataFrame:
+    """F28: observed balance moments; tied movements are applied together.
+
+    F26 counts drops per active day, F27 later deposits per active day and F28
+    the median seconds until the first later deposit. Deposits at the drop's
+    timestamp are not subsequent events. Unknown anchors or unsorted histories
+    remain NaN. Input must be sorted chronologically per player across files.
     """
-    F28:
-    Median time (seconds) between the player's balance falling below EUR 2
-    (triggered by a negative interaction) and then making a deposit.
-
-    Output:
-      - f28_median_seconds_below2_to_deposit: float (seconds) or NaN if:
-          * balance never fell below 2, OR
-          * no deposit occurred after having balance < 2.
-
-    Assumptions:
-      - Uses a shared, snapshot-based opening balance; unknown stays NaN.
-      - Input transactions are globally sorted by Transaction_Datetime (across files),
-        so per-player state is correct without a per-PID sort step.
-      - No '+1 day' logic. Filter is [start, end).
-      - Counts only SUCCESSFUL transactions.
-      - Negative interactions are any tx with amount < 0 (after STAKE coercion).
-      - Deposit counted when Transaction_Type == "DEPOSIT" and bal_before < 2.
-
-    Implementation notes:
-      - We record episode start timestamp when a debit causes a drop from >=2 to <2.
-      - For that episode, we take the FIRST subsequent deposit while bal_before < 2,
-        then close the episode.
-      - We can have multiple episodes per player; we take the median delta seconds.
-    """
-    if log_path:
-        logger = _setup_feature_logger(log_path, "f28_median_seconds_below2_to_deposit")
-        logger.info("▶ START F28: Median seconds from balance<2 to deposit")
-        if x_tijdspad:
-            logger.info(f"  Tijdsfiltering: {x_tijdspad[0]} - {x_tijdspad[1]} (no +1 logic)")
-    else:
-        logger = None
-
-    # ---- tijdspad ----
-    if x_tijdspad:
-        start_datum = parse_ddmmyyyy_to_timestamp(x_tijdspad[0])
-        eind_datum  = parse_ddmmyyyy_to_timestamp(x_tijdspad[1])
-    else:
-        start_datum = None
-        eind_datum  = None
-
-    # ---- anchor output on F1 players (consistent with your other per-day features) ----
-    f1 = f1_active_days(tables, x_tijdspad=x_tijdspad, chunksize=chunksize, log_path=None, verbose=verbose)
+    column = "f28_median_seconds_below2_to_deposit"
+    f1 = f1_active_days(tables, x_tijdspad=x_tijdspad, chunksize=chunksize,
+                        log_path=None, verbose=verbose)
     if f1.empty:
-        return pd.DataFrame(columns=["Player_Profile_ID", "f28_median_seconds_below2_to_deposit"])
-    f1_players = set(f1["Player_Profile_ID"].astype(str).tolist())
-
+        return pd.DataFrame(columns=["Player_Profile_ID", column])
     if start_balances is None:
         start_balances = reconstruct_start_balances(
-            tables, x_tijdspad=x_tijdspad, chunksize=chunksize, verbose=verbose,
-        )
-    if logger:
-        logger.info(f"  Reliable opening balances: {len(start_balances):,} players")
-
-    if not start_balances:
-        return pd.DataFrame({"Player_Profile_ID": list(f1_players), "f28_median_seconds_below2_to_deposit": np.nan})
-
-    tx_paths = tables.get("WOK_Player_Account_Transaction")
-    if not tx_paths:
-        return pd.DataFrame(columns=["Player_Profile_ID", "f28_median_seconds_below2_to_deposit"])
-
-    threshold = 2.0
-
-    # per-player running state
-    running_balance: Dict[str, float] = {}
-    # if player is currently in a "below2 episode waiting for a deposit", store start timestamp
-    below2_start_ts: Dict[str, pd.Timestamp] = {}
-    # store deltas per player (seconds)
-    deltas_sec: Dict[str, List[float]] = {}
-    # track whether balance EVER fell below 2 (for spec N/A reasons)
-    ever_below2: Dict[str, bool] = {}
-
-    coerced_stake_warned = False
-
-    for df in iter_csv_chunks(
-        paths=tx_paths,
-        usecols=[
-            "Player_Profile_ID",
-            "Transaction_Datetime",
-            "Transaction_Amount",
-            "Transaction_Type",
-            "Transaction_Status",
-        ],
-        chunksize=chunksize,
-        verbose=verbose,
-    ):
-        df = df[df["Player_Profile_ID"].notna()].copy()
-        df = df[df["Player_Profile_ID"].astype(str).isin(start_balances)]
-        if df.empty:
-            continue
-
-        # Successful only
-        df = df[df["Transaction_Status"] == "SUCCESSFUL"]
-        if df.empty:
-            continue
-
-        ts = pd.to_datetime(df["Transaction_Datetime"], errors="coerce", utc=True, format="mixed").dt.tz_localize(None)
-        df["ts"] = ts
-        df = df[df["ts"].notna()]
-        if df.empty:
-            continue
-
-        if start_datum is not None:
-            mask = (df["ts"] >= start_datum) & (df["ts"] < eind_datum)
-            if not mask.any():
-                continue
-            df = df.loc[mask].copy()
-
-        df["amount"] = pd.to_numeric(df["Transaction_Amount"], errors="coerce")
-        df = df[np.isfinite(df["amount"])]
-        if df.empty:
-            continue
-
-        # Enforce STAKE negative (one-time warning)
-        is_stake = df["Transaction_Type"].astype(str).eq("STAKE")
-        to_flip = is_stake & (df["amount"] > 0)
-        if to_flip.any():
-            df.loc[to_flip, "amount"] = -df.loc[to_flip, "amount"]
-            if (not coerced_stake_warned) and logger:
-                logger.warning("⚠️ Coerced positive STAKE amounts to negative (one-time warning).")
-            coerced_stake_warned = True
-
-        # If you truly guarantee global sorting by Transaction_Datetime, you do NOT need this.
-        # Keeping it would be harmful if it reorders across players inside a chunk.
-        # So: do NOT sort here.
-
-        pid_col = df.columns.get_loc("Player_Profile_ID")
-        ts_col  = df.columns.get_loc("ts")
-        amt_col = df.columns.get_loc("amount")
-        typ_col = df.columns.get_loc("Transaction_Type")
-
-        for i in range(len(df)):
-            pid = str(df.iat[i, pid_col])
-            t   = df.iat[i, ts_col]
-            amt = float(df.iat[i, amt_col])
-            typ = str(df.iat[i, typ_col])
-
-            if pid not in running_balance:
-                running_balance[pid] = start_balances[pid]
-                ever_below2.setdefault(pid, False)
-                deltas_sec.setdefault(pid, [])
-
-            bal_before = running_balance[pid]
-            bal_after  = bal_before + amt
-            running_balance[pid] = bal_after
-
-            # episode start condition: negative interaction causes drop from >=2 to <2
-            if amt < 0 and (bal_before >= threshold) and (bal_after < threshold):
-                ever_below2[pid] = True
-                # start a new episode (overwrite any existing pending one)
-                below2_start_ts[pid] = t
-
-            # if we're in an episode, count FIRST deposit that occurs while balance is still <2 before deposit
-            if typ == "DEPOSIT" and pid in below2_start_ts:
-                if bal_before < threshold:
-                    dt = (t - below2_start_ts[pid]).total_seconds()
-                    if dt >= 0:
-                        deltas_sec[pid].append(float(dt))
-                    # close episode (only first deposit after drop)
-                    del below2_start_ts[pid]
-
-    # ---- compute median per player (anchored on F1 players) ----
+            tables, x_tijdspad=x_tijdspad, chunksize=chunksize, verbose=verbose)
+    states = balance_events(tables, start_balances, x_tijdspad=x_tijdspad,
+                            chunksize=chunksize, verbose=verbose,
+                            collect_intervals=True) if start_balances else {}
     records = []
-    for pid in f1_players:
-        if not ever_below2.get(pid, False):
-            med = np.nan
-        else:
-            vals = deltas_sec.get(pid, [])
-            med = float(np.median(vals)) if vals else np.nan
-        records.append({"Player_Profile_ID": pid, "f28_median_seconds_below2_to_deposit": med})
-
-    out = pd.DataFrame.from_records(records)
-
-    if logger:
-        na = out["f28_median_seconds_below2_to_deposit"].isna().sum()
-        logger.info(f"✅ F28 klaar: {len(out):,} spelers (anchored on F1)")
-        logger.info(f"   N/A: {na:,}")
-
-    return out
+    for pid, days in f1[["Player_Profile_ID", "f1_active_days"]].itertuples(index=False, name=None):
+        pid = str(pid)
+        state = states.get(pid)
+        value = np.nan
+        if state is not None and not state.unknown:
+            if state.intervals:
+                value = float(np.median(state.intervals))
+        records.append({"Player_Profile_ID": pid, column: value})
+    result = pd.DataFrame(records)
+    if log_path:
+        logger = _setup_feature_logger(log_path, column)
+        logger.info(f"Completed {column}: {len(result)} players, {result[column].isna().sum()} unknown")
+    return result
 
 # ------------------------------
 # F29: Sessions per active day (other games + pre-drawn) — via WOK_Game_Session
@@ -9450,6 +9013,7 @@ FEATURES_REGISTRY = {
                 "Player_Profile_ID",
                 "Player_Profile_Status",
                 "Player_Profile_Modified",
+                "Extraction_Date",
             ],
         },
         "log_name": "f25_voluntary_suspensions.log",
