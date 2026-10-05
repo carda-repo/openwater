@@ -233,7 +233,7 @@ Time-of-Day Play Patterns
 Session & Duration Metrics
   • Sessions per Day (F29) – Compute the average number of casino game sessions per day. Count the total number of WOK_Game_Session records for the player in the period (each session of a slot, roulette, blackjack, etc. is one count). Divide this count by F1 (days active). (If the player had no game sessions, this can be 0.)
   • Concurrent Play Avg (F30) – Measure the player’s tendency to multi-play during casino sessions. For each WOK_Game_Session (each session of “other games”), count how many other interactions (bets on different games or other sessions) the player started during that session’s timeframe. Compute the average of these counts across all sessions. (If the player never played multiple games at once, this will be 0.)
-  • Median Rounds per Session (F31) – Calculate the typical length of a game session in terms of bets/rounds played. For each game session (WOK_Game_Session), count the number of individual bets or plays that occurred in that session. (This can be derived by counting Transaction_Type = STAKE entries that fall between the session’s start and end timestamps for that player and game.) Then take the median of these counts over all sessions. (If no sessions were played, output NA.)
+  • Median Rounds per Session (F31) – Read Game_Session_Rounds from WOK_Game_Session and take the median of the valid round counts per player. Use WOK_Game_Session_Transaction only to link sessions to players; each session contributes once per player regardless of its transaction count. Missing or invalid round counts are not replaced with transaction counts.
   • Median Bet Resolution Time (F46) – Determine the median time (in seconds) between placing a bet and its resolution. For all bets in WOK_Bet that have a settlement (outcome), calculate the time difference between the bet acceptance timestamp and the bet settlement/result time. Take the median of these durations. (Requires that WOK_Bet or related data provides both the bet placement time and the time the bet was settled. Exclude bets that were not resolved in the period.)
   • Median Session Length (F47) – Compute the median duration of game sessions. Use WOK_Game_Session start and end times to find the length of each session (in seconds). Then take the median of all session lengths. (If the player had no game sessions, this can be NA.)
 
@@ -4718,14 +4718,19 @@ def f31_median_rounds_per_session(
     """
     F31: Median Rounds per Session
 
-    Calculate median number of transactions per session for casino games.
-    Uses Game_Transactions JSON to count transactions per session.
+    Calculate the median of Game_Session_Rounds for each player. The relational
+    WOK_Game_Session_Transaction table supplies player links only; multiple
+    transactions in a session do not multiply the session's round count.
+
+    Only positive, finite integer round counts are used. Known players with no
+    valid round counts receive NaN; transaction counts are not a fallback.
 
     Input:
-        - WOK_Game_Session: Game_Transactions (count transactions per session)
+        - WOK_Game_Session: pk_id, Game_Session_Start_Datetime, Game_Session_Rounds
+        - WOK_Game_Session_Transaction: session-to-player links
 
     Output:
-        - f31_median_rounds_per_session: Float (median transactions per session)
+        - f31_median_rounds_per_session: Float (median rounds per session)
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f31_median_rounds_per_session")
@@ -4755,12 +4760,15 @@ def f31_median_rounds_per_session(
 
     for df in iter_csv_chunks(
         paths=session_paths,
-        usecols=["pk_id", "Game_Session_Start_Datetime"],
+        usecols=["pk_id", "Game_Session_Start_Datetime", "Game_Session_Rounds"],
         chunksize=chunksize,
         verbose=verbose,
     ):
         if df.empty:
             continue
+
+        if "Game_Session_Rounds" not in df.columns:
+            raise ValueError("F31 requires Game_Session_Rounds in WOK_Game_Session.")
 
         # Time filtering
         if start_datum is not None:
@@ -4770,29 +4778,20 @@ def f31_median_rounds_per_session(
                 continue
             df = df.loc[mask_periode].copy()
 
-        kol_idx_tx = df.columns.get_loc("pk_id")
+        rounds = pd.to_numeric(df["Game_Session_Rounds"], errors="coerce")
+        valid_rounds = rounds.notna() & np.isfinite(rounds) & (rounds > 0) & (rounds % 1 == 0)
+        df["_rounds"] = rounds.where(valid_rounds)
 
-        for rij_index in range(len(df)):
-            pk = df.iat[rij_index, kol_idx_tx]
-
-            # Count transactions per session per player (relationele join i.p.v. JSON)
-            try:
-                transactions = list(session_tx.get(pk, []))
-                if transactions:
-                    # Group by player
-                    player_tx_counts: Dict[str, int] = {}
-                    for player_id, _tx_id in transactions:
-                        if player_id not in player_tx_counts:
-                            player_tx_counts[player_id] = 0
-                        player_tx_counts[player_id] += 1
-
-                    # Add to per-player session list
-                    for player_id, count in player_tx_counts.items():
-                        if player_id not in rounds_per_session_per_speler:
-                            rounds_per_session_per_speler[player_id] = []
-                        rounds_per_session_per_speler[player_id].append(count)
-            except (AttributeError, TypeError):
-                continue
+        for pk, round_count in df[["pk_id", "_rounds"]].itertuples(index=False, name=None):
+            players = {
+                str(player_id).strip()
+                for player_id, _transaction_id in session_tx.get(pk, [])
+                if pd.notna(player_id) and str(player_id).strip()
+            }
+            for player_id in players:
+                counts = rounds_per_session_per_speler.setdefault(player_id, [])
+                if pd.notna(round_count):
+                    counts.append(int(round_count))
 
     # Calculate median per player
     records = []
@@ -4820,7 +4819,7 @@ def f31_median_rounds_per_session(
         if len(result) > 0:
             valid = result[result["f31_median_rounds_per_session"].notna()]
             if len(valid) > 0:
-                logger.info(f"   Gemiddeld: {valid['f31_median_rounds_per_session'].mean():.1f} rounds/session")
+                logger.info(f"   Gemiddelde van spelermedianen: {valid['f31_median_rounds_per_session'].mean():.1f} rounds/session")
 
     return result
 
@@ -10213,10 +10212,12 @@ FEATURES_REGISTRY = {
             "WOK_Game_Session": [
                 "pk_id",
                 "Game_Session_Start_Datetime",
+                "Game_Session_Rounds",
             ],
             "WOK_Game_Session_Transaction": [
                 "wok_game_session_pk_id",
                 "player_profile_id",
+                "transaction_id",
             ],
         },
         "log_name": "f31_median_rounds_per_session.log",
