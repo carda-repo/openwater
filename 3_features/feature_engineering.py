@@ -69,6 +69,7 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 from path_finding import iter_csv_chunks
+from local_time import local_day_labels
 from reading_difficult_json import simple_Player_Profile_Bank_Account_json_iterator, simple_RG_Class_Value_from_FLAG_RG_CLASS_json_iterator 
 from mapping_helpers import build_txid_to_player_map_ram, haal_uit_bank_json_iterator
 from reading_difficult_json import iter_limit_values, iter_transaction_ids_from_Game_Transactions, iter_part_ids_from_Bet_Parts, iter_player_profile_ids_from_Bet_Transactions, get_list_of_response_ids_from_Responses_list
@@ -1695,7 +1696,7 @@ def april_mei_2025_features(
             continue
 
         # active days (floor to day)
-        days = sub_ts.dt.floor("D")
+        days = local_day_labels(sub_ts)
         ids = sub["Player_Profile_ID"]
 
         # register players
@@ -2006,7 +2007,7 @@ def maak_flexible_x_features(
             continue
 
         # Active days (floor to day)
-        days = sub_ts.dt.floor("D")
+        days = local_day_labels(sub_ts)
         ids = sub["Player_Profile_ID"]
 
         # Register players with data in X period
@@ -2228,7 +2229,7 @@ def transactions(
         print(f'chunk {df.columns} at current_time {current_time_string}')
         
         # --- 1) Parse naar dagen, dus verwijder tijdsgedeelte ---
-        date_column = pd.to_datetime(df["Transaction_Datetime"], errors="coerce").dt.floor("D")
+        date_column = local_day_labels(pd.to_datetime(df["Transaction_Datetime"], errors="coerce", utc=True, format="mixed"))
 
         # --- 2) Success mask (jouw definitie: successful/SUCCESSFUL = True) ---
         success = df["Transaction_Status"].astype(str).str.lower().eq("successful")

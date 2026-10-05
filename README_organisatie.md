@@ -205,10 +205,16 @@ poetry run python run_pipeline.py --help
   `5_descriptive\run_descriptive.py` resp. `_logging\run_with_log.py` (see `README.md`).
 - **Data-driven monthly bucketing**: the sorting picks buckets based on the actual date range of
   your data — no fixed window, no data loss.
+- **Dutch play times**: clock hours, weekdays and transaction activity dates use
+  `Europe/Amsterdam`, including summer/winter time. This applies to F41–F45, active-day
+  counts, calendar-day spans, streaks and daily/weekly aggregates, including the basis
+  features for night/weekend activity. Conversion runs per chunk without extra file scans.
+  Source timestamps, analysis-window boundaries, balance snapshots and elapsed durations
+  remain UTC; profile `Extraction_Date` reporting-day counts retain their UTC definition.
 - **F16 financial activation**: uses the first successful stake, deposit or withdrawal in the
   available history and the last such transaction in the feature period. Supply transaction
   history from before that period to recover the actual activation date. The period includes
-  the entire end date; elapsed calendar days have a minimum of 1 and no upper limit.
+  the entire UTC end date; Dutch calendar-day differences have a minimum of 1 and no upper limit.
 - **F26–F28 opening balances**: use the latest snapshot at/before the feature-window start,
   or reconstruct from the earliest later snapshot within that window. Older snapshots are
   advanced using the intervening transactions. The reconstruction is shared across the three
@@ -481,10 +487,16 @@ poetry run python run_pipeline.py --help
   `5_descriptive\run_descriptive.py` resp. `_logging\run_with_log.py` (zie `README.md`).
 - **Datagedreven maand-bucketing**: de sortering kiest de buckets op basis van het werkelijke
   datumbereik van je data — geen vast venster, geen dataverlies.
+- **Nederlandse speeltijden**: uren, weekdagen en transactiedagen gebruiken
+  `Europe/Amsterdam`, inclusief zomer- en wintertijd. Dit geldt voor F41–F45, actieve dagen,
+  kalenderdagverschillen, speelreeksen en dag-/weekaggregaties, waaronder de basisfeatures
+  voor nacht- en weekendactiviteit. De omzetting gebeurt per chunk zonder extra bestandsdoorlopen.
+  Brontijdstippen, analysevenstergrenzen, saldomomenten en verstreken tijd blijven UTC;
+  rapportagedagen op basis van profiel-`Extraction_Date` behouden hun UTC-definitie.
 - **F16 financiële activatie**: gebruikt de eerste succesvolle inzet, storting of opname in de
   beschikbare historie en de laatste daarvan binnen het featurevenster. Lever ook eerdere
-  transactiehistorie aan om de echte activatiedatum te kunnen bepalen. De volledige einddatum
-  telt mee; verstreken kalenderdagen hebben een minimum van 1 en geen bovengrens.
+  transactiehistorie aan om de echte activatiedatum te kunnen bepalen. De volledige UTC-einddatum
+  telt mee; Nederlandse kalenderdagverschillen hebben een minimum van 1 en geen bovengrens.
 - **Beginsaldi voor F26–F28**: gebruiken het laatste saldomoment op/vóór de start van het
   featurevenster, of rekenen terug vanaf het eerste latere saldomoment binnen dat venster.
   Bij oudere saldi worden ook de tussenliggende transacties verwerkt. De reconstructie wordt

@@ -286,6 +286,7 @@ from path_finding import iter_csv_chunks
 from balance_reconstruction import reconstruct_start_balances
 from stake_time_shares import net_stake_time_shares
 from bet_loss_intervals import median_loss_to_next_bet
+from local_time import local_time, local_date
 from reading_difficult_json import simple_Player_Profile_Bank_Account_json_iterator, simple_RG_Class_Value_from_FLAG_RG_CLASS_json_iterator 
 from mapping_helpers import build_txid_to_player_map_ram, haal_uit_bank_json_iterator
 from reading_difficult_json import iter_limit_values, iter_transaction_ids_from_Game_Transactions, iter_part_ids_from_Bet_Parts, iter_player_profile_ids_from_Bet_Transactions, iter_transaction_ids_from_Bet_Transactions, get_list_of_response_ids_from_Responses_list, iter_part_live_flags_from_Bet_Parts, _safe_load_json_relaxed
@@ -526,6 +527,7 @@ def f1_active_days(
 
     Output:
         - f1_active_days: Integer (aantal unieke dagen met inzet)
+    Clock hours/activity dates use Europe/Amsterdam; window filtering stays UTC.
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f1_active_days")
@@ -590,7 +592,7 @@ def f1_active_days(
 
         # 4. Voeg unieke (Player, Date) combinaties toe aan de set
         # We itereren over de zip om het snel in de set te proppen
-        current_dates = ts.dt.date
+        current_dates = local_time(ts).dt.date
         current_pids = df["Player_Profile_ID"]
         
         if verbose:
@@ -2162,6 +2164,7 @@ def f14_active_period_span(
     Notes:
       - Date filter is [start, end) (no +1 filtering).
       - The +1 at the end is for inclusive span definition, not time filtering.
+    Clock hours/activity dates use Europe/Amsterdam; window filtering stays UTC.
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f14_active_period_span")
@@ -2237,7 +2240,7 @@ def f14_active_period_span(
         mx = max_dates.get(player_id)
         if mx is None:
             continue
-        span_days = (mx.date() - mn.date()).days + 1
+        span_days = (local_date(mx) - local_date(mn)).days + 1
         records.append({"Player_Profile_ID": player_id, "f14_active_period_span": int(span_days)})
 
     result = pd.DataFrame.from_records(records)
@@ -2330,11 +2333,13 @@ def f16_account_age(
     Complete history is needed to recover the actual activation date; there is
     no fallback to registration date.
 
-    Both date boundaries in x_tijdspad are inclusive UTC calendar dates. Without
+    Day differences use Dutch calendar dates. Both date boundaries in x_tijdspad
+    remain inclusive UTC dates (the existing window convention). Without
     x_tijdspad, the last financial transaction in the available history is used.
     Players with no qualifying transaction in the period are omitted.
 
     Output: Player_Profile_ID and f16_account_age (integer days).
+    Clock hours/activity dates use Europe/Amsterdam; window filtering stays UTC.
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f16_account_age")
@@ -2394,7 +2399,7 @@ def f16_account_age(
 
     records = [
         {"Player_Profile_ID": player_id,
-         "f16_account_age": max(1, (last.date() - activation_by_player[player_id].date()).days)}
+         "f16_account_age": max(1, (local_date(last) - local_date(activation_by_player[player_id])).days)}
         for player_id, last in last_by_player.items()
     ]
     result = pd.DataFrame.from_records(records, columns=["Player_Profile_ID", "f16_account_age"])
@@ -5504,6 +5509,7 @@ def f41_heavy_play_hours_count(
 
     Output:
       - f41_heavy_play_hours_count: int (0..24), 0 if no interactions.
+    Clock hours/activity dates use Europe/Amsterdam; window filtering stays UTC.
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f41_heavy_play_hours_count")
@@ -5633,7 +5639,7 @@ def f41_heavy_play_hours_count(
                 continue
             df = df.loc[m2].copy()
 
-        df["hour"] = df["ts"].dt.hour.astype("int16")
+        df["hour"] = local_time(df["ts"]).dt.hour.astype("int16")
 
         grp = df.groupby(["Player_Profile_ID", "hour"]).size()
         for (pid, hour), c in grp.items():
@@ -5691,6 +5697,7 @@ def f42_morning_interaction_percentage(
 
     Output:
       - f42_morning_interaction_percentage: float in [0,1], NaN if total interactions == 0
+    Clock hours/activity dates use Europe/Amsterdam; window filtering stays UTC.
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f42_morning_interaction_percentage")
@@ -5736,7 +5743,7 @@ def f42_morning_interaction_percentage(
                     continue
                 df = df.loc[m].copy()
 
-            df["hour"] = df["ts"].dt.hour.astype("int16")
+            df["hour"] = local_time(df["ts"]).dt.hour.astype("int16")
 
             idx_pk = df.columns.get_loc("pk_id")
             idx_hr = df.columns.get_loc("hour")
@@ -5788,7 +5795,7 @@ def f42_morning_interaction_percentage(
                     continue
                 df = df.loc[m].copy()
 
-            df["hour"] = df["ts"].dt.hour.astype("int16")
+            df["hour"] = local_time(df["ts"]).dt.hour.astype("int16")
 
             idx_pk = df.columns.get_loc("pk_id")
             idx_hr = df.columns.get_loc("hour")
@@ -5857,6 +5864,7 @@ def f43_evening_interaction_percentage(
 
     Output:
       - f43_evening_interaction_percentage: float in [0,1], NaN if total interactions == 0
+    Clock hours/activity dates use Europe/Amsterdam; window filtering stays UTC.
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f43_evening_interaction_percentage")
@@ -5902,7 +5910,7 @@ def f43_evening_interaction_percentage(
                     continue
                 df = df.loc[m].copy()
 
-            df["hour"] = df["ts"].dt.hour.astype("int16")
+            df["hour"] = local_time(df["ts"]).dt.hour.astype("int16")
 
             idx_pk = df.columns.get_loc("pk_id")
             idx_hr = df.columns.get_loc("hour")
@@ -5953,7 +5961,7 @@ def f43_evening_interaction_percentage(
                     continue
                 df = df.loc[m].copy()
 
-            df["hour"] = df["ts"].dt.hour.astype("int16")
+            df["hour"] = local_time(df["ts"]).dt.hour.astype("int16")
 
             idx_pk = df.columns.get_loc("pk_id")
             idx_hr = df.columns.get_loc("hour")
@@ -6010,7 +6018,7 @@ def f44_morning_stakes_percentage(
     verbose: bool = False,
     stake_shares: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """F44: net stake share at 08:00–15:59 UTC, after successful void refunds.
+    """F44: net stake share at 08:00–15:59 Dutch time, after successful void refunds.
 
     Refunds are allocated proportionally to their linked bet/session's original
     stakes, not to the refund hour. Unknown links or zero net stakes yield NaN.
@@ -6039,7 +6047,7 @@ def f45_evening_stakes_percentage(
     verbose: bool = False,
     stake_shares: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """F45: net stake share at 16:00–23:59 UTC, using F44's refund allocation.
+    """F45: net stake share at 16:00–23:59 Dutch time, using F44's refund allocation.
 
     Successful VOID_BET/VOID_STAKE reduce the linked bet/session's original
     stakes. Unknown links or zero net stakes yield NaN, not a zero share.
@@ -7299,6 +7307,7 @@ def f54_post_median_active_days_percentage(
       - No '+1 day' logic. Filter is [start, end).
       - Assumes input is globally sorted by Transaction_Datetime.
       - Does NOT compute a median timestamp; uses median position (stable, streaming-friendly).
+    Clock hours/activity dates use Europe/Amsterdam; window filtering stays UTC.
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f54_post_median_active_days_percentage")
@@ -7406,7 +7415,7 @@ def f54_post_median_active_days_percentage(
             continue
 
         # day bucket
-        df["day"] = df["ts"].dt.date
+        df["day"] = local_time(df["ts"]).dt.date
 
         pid_col = df.columns.get_loc("Player_Profile_ID")
         day_col = df.columns.get_loc("day")
@@ -7886,6 +7895,7 @@ def f57_longest_daily_streak(
     - Counts at most 1 interaction per player per calendar day (dedup within day).
     - Streak increments only when day is exactly previous_day + 1.
     - No '+1 day' logic. Filter is [start, end).
+    Clock hours/activity dates use Europe/Amsterdam; window filtering stays UTC.
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f57_longest_daily_streak")
@@ -7935,7 +7945,7 @@ def f57_longest_daily_streak(
                 continue
             df = df.loc[mask].copy()
 
-        df["day"] = df["ts"].dt.date
+        df["day"] = local_time(df["ts"]).dt.date
 
         pid_col = df.columns.get_loc("Player_Profile_ID")
         day_col = df.columns.get_loc("day")
@@ -7994,6 +8004,7 @@ def f58_longest_streak_ratio(
     - Assumes WOK_Player_Account_Transaction is sorted by Transaction_Datetime (global).
     - Deduplicates within-day per player (multiple tx same day count as 1 active day).
     - No '+1 day' logic. Filter is [start, end).
+    Clock hours/activity dates use Europe/Amsterdam; window filtering stays UTC.
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f58_longest_streak_ratio")
@@ -8044,7 +8055,7 @@ def f58_longest_streak_ratio(
                 continue
             df = df.loc[mask].copy()
 
-        df["day"] = df["ts"].dt.date
+        df["day"] = local_time(df["ts"]).dt.date
 
         pid_col = df.columns.get_loc("Player_Profile_ID")
         day_col = df.columns.get_loc("day")
@@ -8121,6 +8132,7 @@ def f59_median_daily_time_off(
         with 0 < gap_hours < 24.
       - No '+1 day' logic. Filter is [start, end).
       - Streaming, avoids storing all timestamps.
+    Clock hours/activity dates use Europe/Amsterdam; window filtering stays UTC.
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f59_median_daily_time_off")
@@ -8175,7 +8187,7 @@ def f59_median_daily_time_off(
                 continue
             df = df.loc[mask].copy()
 
-        df["day"] = df["ts"].dt.date
+        df["day"] = local_time(df["ts"]).dt.date
 
         pid_col = df.columns.get_loc("Player_Profile_ID")
         ts_col  = df.columns.get_loc("ts")

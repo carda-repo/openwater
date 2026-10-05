@@ -74,7 +74,8 @@ def test_period_includes_start_and_entire_end_date_and_excludes_following_day(tm
         _transaction("future", "2026-04-01T00:00:00Z"),
     ])
     result = f16_account_age({TABLE: [path]}, x_tijdspad=["01032026", "31032026"], chunksize=1)
-    assert _values(result) == {"start": 59, "end": 89}
+    # UTC window boundaries are retained; the late end transaction is locally April 1.
+    assert _values(result) == {"start": 59, "end": 90}
 
 
 def test_calendar_days_have_minimum_one_and_no_ten_year_cap(tmp_path):
@@ -87,7 +88,8 @@ def test_calendar_days_have_minimum_one_and_no_ten_year_cap(tmp_path):
         _transaction("old-account", "2026-01-01"),
     ])
     result = f16_account_age({TABLE: [path]}, x_tijdspad=["01012026", "31012026"], chunksize=2)
-    assert _values(result) == {"same-day": 1, "calendar-days": 2, "old-account": 4383}
+    # Jan 1 at 23:59 UTC is Jan 2 in Amsterdam: one calendar day to Jan 3.
+    assert _values(result) == {"same-day": 1, "calendar-days": 1, "old-account": 4383}
 
 
 def test_invalid_rows_are_ignored_and_timestamps_use_utc(tmp_path):

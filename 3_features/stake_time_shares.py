@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from path_finding import iter_csv_chunks
+from local_time import local_time
 
 
 def _id(value):
@@ -26,6 +27,7 @@ def net_stake_time_shares(tables, *, x_tijdspad=None, chunksize=200_000, verbose
     sharing the same parent pk_id can still be used. Unmatched/ambiguous refunds
     leave the player's shares unknown rather than deducting from unrelated stakes.
 
+    Placement hours use Europe/Amsterdam, including summer/winter time.
     Refunds reduce their bet/session's stakes proportionally, including stakes before
     the window. This is an explicit allocation rule: the export has no original-stake
     ID on refunds. Only transactions before the exclusive window end are used, so
@@ -64,13 +66,14 @@ def net_stake_time_shares(tables, *, x_tijdspad=None, chunksize=200_000, verbose
         typ = df["Transaction_Type"].fillna("").astype(str).str.strip().str.upper()
         status = df["Transaction_Status"].fillna("").astype(str).str.strip().str.upper()
         ts = pd.to_datetime(df["Transaction_Datetime"], errors="coerce", utc=True, format="mixed").dt.tz_localize(None)
+        hours = local_time(ts).dt.hour
         money = pd.to_numeric(df["Transaction_Amount"], errors="coerce")
         mask = typ.isin(["STAKE", "VOID_BET", "VOID_STAKE"]) & status.eq("SUCCESSFUL") & ts.notna() & np.isfinite(money)
         if end is not None:
             mask &= ts < end
         txids = df.get("Transaction_ID", pd.Series(index=df.index, dtype=object))
-        for pid, txid, kind, timestamp, value in zip(df.loc[mask, "Player_Profile_ID"], txids[mask],
-                                                    typ[mask], ts[mask], money[mask]):
+        for pid, txid, kind, timestamp, value, hour in zip(df.loc[mask, "Player_Profile_ID"], txids[mask],
+                                                    typ[mask], ts[mask], money[mask], hours[mask]):
             pid, txid = _id(pid), _id(txid)
             if pid is None:
                 continue
@@ -92,7 +95,7 @@ def net_stake_time_shares(tables, *, x_tijdspad=None, chunksize=200_000, verbose
             if kind == "STAKE":
                 acc[0] += abs(value)
                 if in_window:
-                    bucket = 0 if timestamp.hour < 8 else (1 if timestamp.hour < 16 else 2)
+                    bucket = 0 if hour < 8 else (1 if hour < 16 else 2)
                     acc[2 + bucket] += abs(value)
             else:
                 acc[1] += abs(value)

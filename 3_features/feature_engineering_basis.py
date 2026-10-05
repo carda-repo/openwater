@@ -59,6 +59,7 @@ import logging
 import pandas as pd
 import numpy as np
 from path_finding import iter_csv_chunks
+from local_time import local_time, local_day_labels
 from reading_difficult_json import (
     iter_limit_values,
     _safe_load_json_relaxed,
@@ -259,7 +260,7 @@ def var1b_variantie_ingezet_bedrag_per_dag(
         if df.empty:
             continue
 
-        df["date"] = ts.loc[df.index].dt.floor("D")
+        df["date"] = local_day_labels(ts.loc[df.index])
         df["amount"] = pd.to_numeric(df["Transaction_Amount"], errors="coerce").abs()
         df = df[df["amount"].notna() & df["date"].notna()]
 
@@ -484,7 +485,7 @@ def var2b_variantie_aantal_transacties_per_dag(
             df = df.loc[mask_periode].copy()
             ts = ts.loc[mask_periode]
 
-        df["date"] = ts.loc[df.index].dt.floor("D")
+        df["date"] = local_day_labels(ts.loc[df.index])
         df = df[df["date"].notna()]
 
         dag_counts = df.groupby(["Player_Profile_ID", "date"]).size()
@@ -570,7 +571,7 @@ def var3a_totaal_aantal_actieve_dagen(
             df = df.loc[mask_periode].copy()
             ts = ts.loc[mask_periode]
 
-        df["date"] = ts.loc[df.index].dt.floor("D")
+        df["date"] = local_day_labels(ts.loc[df.index])
         df = df[df["date"].notna()]
 
         for pid, grp in df.groupby("Player_Profile_ID"):
@@ -645,8 +646,8 @@ def var3b_variantie_aantal_actieve_dagen_per_week(
             ts = ts.loc[mask_periode]
 
         ts_clean = ts.loc[df.index]
-        df["date"] = ts_clean.dt.floor("D")
-        df["week"] = ts_clean.dt.to_period("W").astype(str)
+        df["date"] = local_day_labels(ts_clean)
+        df["week"] = df["date"].dt.to_period("W").astype(str)
         df = df[df["date"].notna()]
 
         # Vectorized: unieke datums per (speler, week)
@@ -728,7 +729,7 @@ def var3c_percentage_actieve_dagen_in_periode(
             df = df.loc[mask_periode].copy()
             ts = ts.loc[mask_periode]
 
-        df["date"] = ts.loc[df.index].dt.floor("D")
+        df["date"] = local_day_labels(ts.loc[df.index])
         df = df[df["date"].notna()]
 
         for pid, grp in df.groupby("Player_Profile_ID"):
@@ -1070,7 +1071,7 @@ def var6a_tot_var6c(
             df = df.loc[mask_periode].copy()
             ts = ts.loc[mask_periode]
 
-        df["date"] = ts.loc[df.index].dt.floor("D")
+        df["date"] = local_day_labels(ts.loc[df.index])
         df = df[df["date"].notna()]
 
         chunk_dag_counts = df.groupby(["Player_Profile_ID", "date"]).size()
@@ -1845,7 +1846,7 @@ def var19a_tot_var19b(
     Var19a–19b: Absolute aantal transacties in het weekend en 's nachts.
 
     Data: WOK_Player_Account_Transaction (Transaction_Datetime)
-    Definities (UTC):
+    Definities (Europe/Amsterdam, inclusief zomer-/wintertijd):
       - Weekend: Transaction_Datetime valt op zaterdag (dayofweek=5) of zondag (6)
       - Nacht:   Transaction_Datetime uur in [22, 23, 0, 1, 2, 3, 4, 5] (22:00–06:00)
     Tijdsfiltering: x_tijdspad op Transaction_Datetime indien opgegeven.
@@ -1896,8 +1897,9 @@ def var19a_tot_var19b(
             if df.empty:
                 continue
 
-        df["__dow"]  = df["__ts"].dt.dayofweek        # 0=Mon … 5=Sat, 6=Sun
-        df["__hour"] = df["__ts"].dt.hour
+        civil_time = local_time(df["__ts"])
+        df["__dow"]  = civil_time.dt.dayofweek        # 0=Mon … 5=Sat, 6=Sun
+        df["__hour"] = civil_time.dt.hour
 
         weekend_mask = df["__dow"] >= 5
         nacht_mask   = (df["__hour"] >= 22) | (df["__hour"] < 6)
@@ -1946,7 +1948,7 @@ def var20a_tot_var20b(
       - var20b_max_inzet_per_dag        : hoogste totaal Transaction_Amount op één dag
 
     Tijdsfiltering: x_tijdspad op Transaction_Datetime indien opgegeven.
-    Datum afgeleid van Transaction_Datetime (UTC, afgekapt naar dag).
+    Datum afgeleid van Transaction_Datetime in Europe/Amsterdam. UTC-venstergrenzen blijven gelijk.
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "var20a_tot_var20b")
@@ -1991,7 +1993,7 @@ def var20a_tot_var20b(
             if df.empty:
                 continue
 
-        df["__day"] = df["__ts"].dt.normalize()
+        df["__day"] = local_day_labels(df["__ts"])
         df["Transaction_Amount"] = pd.to_numeric(df["Transaction_Amount"], errors="coerce").fillna(0.0)
 
         for pid, grp in df.groupby("Player_Profile_ID"):
