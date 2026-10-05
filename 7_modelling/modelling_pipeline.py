@@ -88,6 +88,7 @@ def make_effective_config(
         cfg["exclude_models"] = list(exclude_models)
     if overrides:
         cfg.update(overrides)
+    cfg.setdefault("Niels_Identity_Confounding_switch", True)
     return cfg
 
 

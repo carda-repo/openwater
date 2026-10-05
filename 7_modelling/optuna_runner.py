@@ -47,6 +47,11 @@ from hpsearch_runner import (
     ID_COL_DEFAULT,
     RANDOM_STATE_DEFAULT,
     DTYPE_MAPPING,
+    identity_enabled,
+    identity_groups,
+    person_holdout,
+    fit_group_safe,
+    validate_prebuilt_identity,
 )
 
 # Maps YAML/sklearn param names → Optuna internal key names (per model prefix)
@@ -419,7 +424,28 @@ def _write_second_half_report(feat_counts: dict, second_half_rows: list, out_dir
     log(f"[SECOND HALF] Report written → {report_path}")
 
 
-def make_objective(X_train, y_train, spw: float, cv_folds: int, random_state: int, rows: list, out_dir: Path, log_fn=print, n_est_options: Dict[str, list] = None, time_budget: float = 0, feature_cols: list = None, active_models: list = None, fold_data: list = None):
+def operator_fold_score(pipe, fold_data):
+    """Reuse the same operator/person boundaries in search and revalidation."""
+    from sklearn.base import clone
+    from hpsearch_runner import safe_auc, safe_auprc
+    scores_pr, scores_auc = [], []
+    for fold in fold_data:
+        X_tr, y_tr, X_ho, y_ho, _spw_fold = fold[:5]
+        groups_tr, groups_ho = fold[5:7] if len(fold) >= 7 else (None, None)
+        if groups_tr is not None and set(groups_tr).intersection(groups_ho):
+            raise ValueError("Operator fold shares persons between training and holdout")
+        fitted = clone(pipe)
+        fit_group_safe(fitted, X_tr, y_tr, groups_tr)
+        scores = _score_pipe(fitted, X_ho)
+        scores_pr.append(safe_auprc(y_ho, scores))
+        scores_auc.append(safe_auc(y_ho, scores))
+    if not scores_pr:
+        raise ValueError("No operator validation folds are available")
+    return (float(np.nanmean(scores_pr)), float(np.nanstd(scores_pr)),
+            float(np.nanmean(scores_auc)), float(np.nanstd(scores_auc)), 0.0)
+
+
+def make_objective(X_train, y_train, spw: float, cv_folds: int, random_state: int, rows: list, out_dir: Path, log_fn=print, n_est_options: Dict[str, list] = None, time_budget: float = 0, feature_cols: list = None, active_models: list = None, fold_data: list = None, groups=None):
     t_search_start = time.time()
     second_half: Dict[str, Any] = {"active": False}  # True once elapsed >= 50% of budget
     feat_counts: Dict[str, int] = defaultdict(int)   # feature importance counts (second half only)
@@ -470,20 +496,27 @@ def make_objective(X_train, y_train, spw: float, cv_folds: int, random_state: in
 
         if fold_data is not None:
             # Operator cross-validation: fit on each fold's train, evaluate on holdout operators
-            import sklearn.base
-            from sklearn.metrics import average_precision_score as _aps
-            fold_praucs = []
-            for X_tr, y_tr, X_ho, y_ho, _spw_fold in fold_data:
+            if groups is not None:
                 try:
-                    pipe_fold = sklearn.base.clone(pipe)
-                    pipe_fold.fit(X_tr, y_tr)
-                    proba = pipe_fold.predict_proba(X_ho)[:, 1]
-                    fold_praucs.append(float(_aps(y_ho, proba)))
-                except Exception:
-                    fold_praucs.append(0.0)
-            mean_pr = float(np.mean(fold_praucs)) if fold_praucs else 0.0
-            std_pr  = float(np.std(fold_praucs))  if len(fold_praucs) > 1 else 0.0
-            mean_auc, std_auc = float("nan"), float("nan")
+                    mean_pr, std_pr, mean_auc, std_auc, _ = operator_fold_score(pipe, fold_data)
+                except Exception as e:
+                    raise optuna.exceptions.TrialPruned(str(e)) from e
+            else:
+                # Preserve the original disabled-switch objective exactly.
+                import sklearn.base
+                from sklearn.metrics import average_precision_score as _aps
+                fold_praucs = []
+                for X_tr, y_tr, X_ho, y_ho, _spw_fold in fold_data:
+                    try:
+                        pipe_fold = sklearn.base.clone(pipe)
+                        pipe_fold.fit(X_tr, y_tr)
+                        proba = pipe_fold.predict_proba(X_ho)[:, 1]
+                        fold_praucs.append(float(_aps(y_ho, proba)))
+                    except Exception:
+                        fold_praucs.append(0.0)
+                mean_pr = float(np.mean(fold_praucs)) if fold_praucs else 0.0
+                std_pr  = float(np.std(fold_praucs))  if len(fold_praucs) > 1 else 0.0
+                mean_auc, std_auc = float("nan"), float("nan")
             _fitted_out = None
         else:
             _fitted_out: list = [] if feature_cols is not None else None
@@ -493,6 +526,7 @@ def make_objective(X_train, y_train, spw: float, cv_folds: int, random_state: in
                     n_folds=cv_folds, random_state=random_state,
                     model_name=model_name,
                     fitted_out=_fitted_out,
+                    groups=groups,
                 )
             except Exception as e:
                 rows.append({
@@ -674,7 +708,7 @@ def _feature_significance_table(X: pd.DataFrame, y: pd.Series, top_n: int = 50):
 
 
 def _write_top_model_statistics(df_cv5, X_train, y_train, X_test, y_test,
-                                 feature_cols, spw, random_state, out_dir, log):
+                                 feature_cols, spw, random_state, out_dir, log, groups=None):
     """
     For each top-N cv5 trial: fit once on X_train, determine thresholds on
     X_train predictions, evaluate confusion matrix on X_test (3 settings),
@@ -781,7 +815,7 @@ def _write_top_model_statistics(df_cv5, X_train, y_train, X_test, y_test,
                 else X_test.reindex(columns=feature_cols)
 
             # Single fit on training (validation) data
-            pipe.fit(X_tr, y_train)
+            fit_group_safe(pipe, X_tr, y_train, groups)
             y_prob_train = _score_pipe(pipe, X_tr)
             y_prob_test  = _score_pipe(pipe, X_te)
 
@@ -859,7 +893,8 @@ def _write_top_model_statistics(df_cv5, X_train, y_train, X_test, y_test,
 
 
 def _run_cv5_and_test(df_out, args, spw, X_train, y_train, out_dir, meta,
-                      use_prebuilt, dataset_path, feature_cols, log):
+                      use_prebuilt, dataset_path, feature_cols, log, groups=None, cfg=None,
+                      fold_data=None, test_data=None):
     """Run cv=5 re-evaluation and/or test evaluation. Shared by normal and --cv5-only paths."""
     best_cv1 = df_out.dropna(subset=["cv_mean_auprc"]).iloc[0] if not df_out.empty else None
     if best_cv1 is not None:
@@ -877,11 +912,14 @@ def _run_cv5_and_test(df_out, args, spw, X_train, y_train, out_dir, meta,
             try:
                 pipe, model_name, imputer, scaler, imbalance_str, raw_params = \
                     _pipeline_from_row(row, spw, args.random_state)
-                mean_pr, std_pr, mean_auc, std_auc, _ = cv_score(
-                    pipe, X_train, y_train,
-                    n_folds=5, random_state=args.random_state,
-                    model_name=model_name,
-                )
+                if fold_data is not None and groups is not None:
+                    mean_pr, std_pr, mean_auc, std_auc, _ = operator_fold_score(pipe, fold_data)
+                else:
+                    mean_pr, std_pr, mean_auc, std_auc, _ = cv_score(
+                        pipe, X_train, y_train,
+                        n_folds=5, random_state=args.random_state,
+                        model_name=model_name, groups=groups,
+                    )
                 cv5_rows.append({
                     "trial": int(row["trial"]), "model": model_name,
                     "imputer": imputer, "scaler": scaler, "imbalance": imbalance_str,
@@ -925,15 +963,23 @@ def _run_cv5_and_test(df_out, args, spw, X_train, y_train, out_dir, meta,
 
     if best_final is None:
         pass
-    elif test_pkl_path is None:
+    elif test_pkl_path is None and test_data is None:
         log("[TEST] No test_full.pkl found — skipping test eval and statistics.")
     else:
         import pickle as _pickle
         from sklearn.metrics import average_precision_score, roc_auc_score
 
-        with open(test_pkl_path, "rb") as _f:
-            _dt = _pickle.load(_f)
-        X_test, y_test = _dt["X"], _dt["y"]
+        if test_data is not None:
+            X_test, y_test, groups_test = test_data
+        else:
+            with open(test_pkl_path, "rb") as _f:
+                _dt = _pickle.load(_f)
+            X_test, y_test = _dt["X"], _dt["y"]
+            _meta_ds = json.loads((dataset_path / "meta.json").read_text(encoding="utf-8"))
+            groups_test = validate_prebuilt_identity(_dt, _meta_ds, cfg or {}, args.id_col)
+        if groups is not None:
+            if groups_test is None or set(groups).intersection(groups_test):
+                raise ValueError("Training and test share persons or lack test groups; rebuild the dataset")
         # Apply same feature filter as training data
         if feature_cols is not None:
             X_test = X_test[[c for c in feature_cols if c in X_test.columns]]
@@ -944,7 +990,7 @@ def _run_cv5_and_test(df_out, args, spw, X_train, y_train, out_dir, meta,
             pipe, model_name, imputer, scaler, imbalance_str, raw_params = \
                 _pipeline_from_row(best_final, spw, args.random_state)
             log("[TEST] Fitting best pipeline on training data ...")
-            pipe.fit(X_train, y_train)
+            fit_group_safe(pipe, X_train, y_train, groups)
             y_prob     = pipe.predict_proba(X_test)[:, 1]
             test_auprc = float(average_precision_score(y_test, y_prob))
             test_auc   = float(roc_auc_score(y_test, y_prob))
@@ -976,7 +1022,7 @@ def _run_cv5_and_test(df_out, args, spw, X_train, y_train, out_dir, meta,
         try:
             _write_top_model_statistics(
                 _df_for_stats, X_train, y_train, X_test, y_test,
-                feature_cols, spw, args.random_state, out_dir, log,
+                feature_cols, spw, args.random_state, out_dir, log, groups=groups,
             )
         except Exception as exc:
             log(f"[STATS] ⚠  top_model_statistics.txt failed: {exc}")
@@ -1011,6 +1057,11 @@ def main(argv=None):
     def log(msg): print(msg, flush=True)
 
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+    use_identity = identity_enabled(cfg)
+    identity_col = (cfg.get("Niels_identity_column") or args.id_col) if use_identity else None
+    groups_train = None
+    test_data = None
+    reserved_test_groups = set()
     data_dir = Path(cfg.get("data_dir", ""))
     target_col = cfg.get("target_col", "") or ""
     validation_period_prefixes = cfg.get("validation_period_prefixes") or []
@@ -1037,18 +1088,43 @@ def main(argv=None):
         X_train, y_train = _dv["X"], _dv["y"]
         import json as _json
         _meta_ds = _json.loads((dataset_path / "meta.json").read_text(encoding="utf-8"))
+        groups_train = validate_prebuilt_identity(_dv, _meta_ds, cfg, args.id_col)
         feature_cols = _meta_ds["feature_cols"]
+        if use_identity and (dataset_path / "test_full.pkl").exists():
+            with open(dataset_path / "test_full.pkl", "rb") as _f:
+                _dt = _pickle.load(_f)
+            groups_test = validate_prebuilt_identity(_dt, _meta_ds, cfg, args.id_col)
+            if not _meta_ds.get("identity_holdout_applied") or set(groups_train).intersection(groups_test):
+                raise ValueError("Pre-built dataset has no valid person test holdout; rebuild the dataset")
+            reserved_test_groups = set(groups_test)
     else:
         log("[DATA] Building combined ALL-operators dataset ...")
-        df_valid, _, merge_meta_valid, _ = build_all_operators_merged_df(
+        df_valid, df_test, merge_meta_valid, merge_meta_test = build_all_operators_merged_df(
             cfg=cfg, data_dir=data_dir,
             validation_period_prefixes=validation_period_prefixes,
             test_period_prefixes=test_period_prefixes,
             id_col=args.id_col, explicit_target_col=target_col,
             column_prefixes=generic_col_prefixes,
         )
+        if use_identity and cfg.get("fold_holdout_operators"):
+            # Independent operator folds evaluate the configured held-out
+            # providers in the same period, matching dataset preparation.
+            cfg_holdout = {**cfg, "all_operators": cfg["fold_holdout_operators"]}
+            df_test, _, merge_meta_test, _ = build_all_operators_merged_df(
+                cfg=cfg_holdout, data_dir=data_dir,
+                validation_period_prefixes=validation_period_prefixes,
+                test_period_prefixes=[], id_col=args.id_col,
+                explicit_target_col=target_col, column_prefixes=generic_col_prefixes,
+            )
         tgt = merge_meta_valid["target_col"]
-        X_train, y_train, feature_cols = make_Xy(df_valid, id_col=args.id_col, target_col=tgt)
+        df_valid, df_test, groups_train, groups_test, identity_meta = person_holdout(
+            df_valid, df_test, cfg, args.id_col, random_state=23,
+        )
+        X_train, y_train, feature_cols = make_Xy(df_valid, id_col=args.id_col, target_col=tgt, identity_col=identity_col)
+        if use_identity and not df_test.empty:
+            X_test, y_test, _ = make_Xy(df_test, id_col=args.id_col, target_col=merge_meta_test["target_col"], identity_col=identity_col)
+            test_data = (X_test, y_test, groups_test)
+            reserved_test_groups = set(groups_test)
 
     # ── --only-these-vars column filter ──────────────────────────────────────
     exclude_models = cfg.get("exclude_models") or []
@@ -1104,8 +1180,16 @@ def main(argv=None):
                 column_prefixes=generic_col_prefixes,
             )
             tgt = meta_tr["target_col"]
-            X_tr, y_tr, _ = make_Xy(df_tr, id_col=args.id_col, target_col=tgt)
-            X_ho, y_ho, _ = make_Xy(df_ho, id_col=args.id_col, target_col=tgt)
+            if use_identity and reserved_test_groups:
+                # Search folds may rebuild raw CSVs, but globally held-out test
+                # persons must remain unavailable during hyperparameter selection.
+                df_tr = df_tr.loc[~identity_groups(df_tr, args.id_col, cfg).isin(reserved_test_groups)].copy()
+                df_ho = df_ho.loc[~identity_groups(df_ho, args.id_col, cfg).isin(reserved_test_groups)].copy()
+            df_tr, df_ho, groups_tr, groups_ho, _ = person_holdout(
+                df_tr, df_ho, cfg, args.id_col, random_state=23,
+            )
+            X_tr, y_tr, _ = make_Xy(df_tr, id_col=args.id_col, target_col=tgt, identity_col=identity_col)
+            X_ho, y_ho, _ = make_Xy(df_ho, id_col=args.id_col, target_col=tgt, identity_col=identity_col)
             # Align to same feature columns as global X_train (respects only_these_vars filter)
             X_tr = X_tr[[c for c in feature_cols if c in X_tr.columns]]
             X_ho = X_ho[[c for c in feature_cols if c in X_ho.columns]]
@@ -1114,7 +1198,8 @@ def main(argv=None):
             spw_fold = float(neg_tr / max(pos_tr, 1))
             log(f"[OPERATOR_FOLDS] fold={fi}  train={len(X_tr)} rows pos={pos_tr} spw={spw_fold:.1f}"
                 f"  holdout={len(X_ho)} rows pos={int(y_ho.sum())}")
-            fold_data.append((X_tr, y_tr, X_ho, y_ho, spw_fold))
+            fold = (X_tr, y_tr, X_ho, y_ho, spw_fold)
+            fold_data.append(fold + (groups_tr, groups_ho) if use_identity else fold)
 
     positives = int(y_train.sum())
     negatives = int((y_train == 0).sum())
@@ -1139,7 +1224,8 @@ def main(argv=None):
         best_final = best_cv1
         _run_cv5_and_test(
             df_out, args, spw, X_train, y_train, out_dir, meta,
-            use_prebuilt, dataset_path, feature_cols, log)
+            use_prebuilt, dataset_path, feature_cols, log, groups=groups_train,
+            cfg=cfg, fold_data=fold_data, test_data=test_data)
         return
 
     seed_trials, n_est_options = _parse_yaml_for_optuna(cfg)
@@ -1175,6 +1261,7 @@ def main(argv=None):
         X_train, y_train, spw, args.cv_folds, args.random_state, rows, out_dir, log, n_est_options,
         time_budget=args.time_budget, feature_cols=feature_cols, active_models=active_models,
         fold_data=fold_data,
+        groups=groups_train,
     )
     study.optimize(_objective, timeout=args.time_budget, catch=(Exception,))
     elapsed = time.time() - t_start
@@ -1208,12 +1295,15 @@ def main(argv=None):
         "n_rows": total, "n_features": len(feature_cols), "pos_rate": round(pos_rate, 6),
         "best_model": str(best_cv1["model"]) if best_cv1 is not None else None,
         "best_val_auprc": float(best_cv1["cv_mean_auprc"]) if best_cv1 is not None else None,
+        "Niels_Identity_Confounding_switch": use_identity,
+        "identity_scope": "operator_player" if use_identity else None,
     }
     (out_dir / "optuna_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     _run_cv5_and_test(
         df_out, args, spw, X_train, y_train, out_dir, meta,
-        use_prebuilt, dataset_path, feature_cols, log)
+        use_prebuilt, dataset_path, feature_cols, log, groups=groups_train,
+        cfg=cfg, fold_data=fold_data, test_data=test_data)
 
 
 if __name__ == "__main__":

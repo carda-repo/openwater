@@ -150,6 +150,8 @@ def run_full_pipeline(
     # ── Stap 6 merge & sample ────────────────────────────────────────────────
     sampling_ratio: int = 0,                       # 0 = geen sampling; N = 1 positive : N negatives
     target_col: str = "",                          # leeg = automatisch afleiden uit prefix
+    Niels_Identity_Confounding_switch: bool = True, # personen scheiden tussen train/valid/test
+    Niels_identity_column: Optional[str] = None,  # spelerskolom in feature-CSV; default Player_Profile_ID
     exclude_models: Optional[List[str]] = None,
     # ── Stap 7/8 modelling ───────────────────────────────────────────────────
     search: str = "optuna",                        # 'optuna' of 'grid'
@@ -234,9 +236,14 @@ def run_full_pipeline(
         valid_prefixes = [_period_prefix(x_tijdspad, y_tijdspad, "valid")]
         test_prefixes = [_period_prefix(x_test, y_test, "test")]
         if (x_test, y_test) == (x_tijdspad, y_tijdspad):
-            print("⚠️  GEEN holdout: test-periode == valid-periode (test spiegelt valid). "
-                  "Alleen voor smoke-tests. Gebruik validation_period_prefixes + "
-                  "test_period_prefixes (of x_test_tijdspad/y_test_tijdspad) voor een echte holdout.")
+            if Niels_Identity_Confounding_switch:
+                print("⚠️  GEEN temporele holdout: test-periode == valid-periode. "
+                      "De identiteiten worden wel gescheiden; gebruik een latere testperiode "
+                      "om toekomstige prestaties te beoordelen.")
+            else:
+                print("⚠️  GEEN holdout: test-periode == valid-periode (test spiegelt valid). "
+                      "Alleen voor smoke-tests. Gebruik validation_period_prefixes + "
+                      "test_period_prefixes (of x_test_tijdspad/y_test_tijdspad) voor een echte holdout.")
 
     # active-filter heeft een LAST_STATUS_LOOKUP per (distinct) y-start nodig
     y_starts = sorted({p.split("_")[2] for p in (valid_prefixes + test_prefixes)})
@@ -321,6 +328,8 @@ def run_full_pipeline(
             validation_period_prefixes=valid_prefixes, test_period_prefixes=test_prefixes,
             all_operators=operators, sampling_ratio=sampling_ratio,
             target_col=target_col, base_scenario=scenario,
+            Niels_Identity_Confounding_switch=Niels_Identity_Confounding_switch,
+            Niels_identity_column=Niels_identity_column, random_state=random_state,
         )
         cfg6["add_operator_ohe"] = add_ohe   # OHE-kolommen wel/niet toevoegen in de merge
         if exclude_models:
@@ -338,6 +347,9 @@ def run_full_pipeline(
         "validation_period_prefixes": valid_prefixes, "test_period_prefixes": test_prefixes,
         "operators": operators, "all_operators": operators, "target_col": target_col,
         "base_scenario": scenario, "add_operator_ohe": add_ohe,
+        "Niels_Identity_Confounding_switch": Niels_Identity_Confounding_switch,
+        "Niels_identity_column": Niels_identity_column,
+        "random_state": random_state,
     }
     if exclude_models:
         model_cfg["exclude_models"] = list(exclude_models)
@@ -459,6 +471,11 @@ def main(argv=None) -> int:
     p.add_argument("--only-these-vars", dest="only_these_vars", default=None,
                    help="Filter featurekolommen (| of , gescheiden).")
     p.add_argument("--random-state", type=int, default=23)
+    p.add_argument("--Niels_Identity_Confounding_switch", "--niels-identity-confounding-switch",
+                   dest="Niels_Identity_Confounding_switch", action=argparse.BooleanOptionalAction,
+                   default=True, help="Scheid personen tussen training, validatie en test (default aan).")
+    p.add_argument("--niels-identity-column", dest="Niels_identity_column", default=None,
+                   help="Spelerskolom in featurebestanden; default Player_Profile_ID. Aanbieder blijft deel van de sleutel.")
     p.add_argument("--config", dest="grid_config", default=None,
                    help="hpsearch_config.yaml (vereist bij --grid).")
     # Operator-folds (operator-niveau CV)
@@ -500,6 +517,8 @@ def main(argv=None) -> int:
         operator_fold_seed=args.operator_fold_seed, skip_all_check=args.skip_all_check,
         exclude_models=_split(args.exclude_models), grid_config=args.grid_config,
         random_state=args.random_state, verbose=args.verbose,
+        Niels_Identity_Confounding_switch=args.Niels_Identity_Confounding_switch,
+        Niels_identity_column=args.Niels_identity_column,
     )
     return 0
 

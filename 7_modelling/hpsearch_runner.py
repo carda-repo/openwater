@@ -3,6 +3,7 @@ import argparse
 import itertools
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional, Iterable
@@ -21,7 +22,7 @@ def _warn_to_stdout(message, category, filename, lineno, file=None, line=None):
 warnings.showwarning = _warn_to_stdout
 
 from sklearn.base import clone
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import train_test_split, StratifiedKFold, GroupShuffleSplit, StratifiedGroupKFold
 from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
@@ -35,6 +36,11 @@ from sklearn.linear_model import SGDClassifier, LogisticRegression
 from sklearn.neural_network import MLPClassifier
 from sklearn.svm import LinearSVC
 from sklearn.calibration import CalibratedClassifierCV
+
+_merge_module_dir = Path(__file__).resolve().parents[1] / "6_merge_sample"
+if str(_merge_module_dir) not in sys.path:
+    sys.path.insert(0, str(_merge_module_dir))
+from identity_splitting import identity_enabled, identity_groups, person_holdout
 
 # Optional packages
 try:
@@ -154,6 +160,8 @@ def prefix_feature_cols(df: pd.DataFrame, prefix: str, id_col: str, target_cols:
             continue
         if c == "ACTIVE_FLAG":
             continue
+        if c in {"__niels_person_id", "__niels_operator_id"}:
+            continue
         rename[c] = f"{prefix}_{c}"
     return df.rename(columns=rename)
 
@@ -216,6 +224,7 @@ def build_merged_df(
     target_source_prefix: str = "",
     explicit_target_col: str = "",
     column_prefixes: Optional[List[str]] = None,
+    identity_col: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Merge CSVs found by period_prefixes into one DataFrame.
@@ -258,10 +267,24 @@ def build_merged_df(
             else:
                 raise
         files_by_prefix[pref] = p
-        df = pd.read_csv(p)
+        df = pd.read_csv(p, dtype={id_col: str, identity_col: str} if identity_col else None)
         if id_col not in df.columns:
             raise ValueError(f"Missing id_col '{id_col}' in {p}")
+        if identity_col and identity_col == id_col and df[id_col].isna().any():
+            raise ValueError(f"Missing person identities in '{id_col}' in {p}")
         df[id_col] = df[id_col].astype(str)
+        if identity_col:
+            df["__niels_operator_id"] = str(operator)
+        if identity_col and identity_col != id_col:
+            if identity_col not in df.columns:
+                raise ValueError(f"Missing person identity column '{identity_col}' in {p}")
+            if df[identity_col].isna().any():
+                raise ValueError(f"Missing person identities in '{identity_col}' in {p}")
+            # Carry the person key without turning it into a period feature.
+            df["__niels_person_id"] = df[identity_col].astype(str)
+            if df.groupby(id_col)["__niels_person_id"].nunique().gt(1).any():
+                raise ValueError(f"Account IDs map to conflicting persons in {p}")
+            df = df.drop(columns=[identity_col])
         before = len(df)
         df = df.drop_duplicates(subset=[id_col], keep="first")
         if len(df) < before:
@@ -316,6 +339,16 @@ def build_merged_df(
         if merged is None:
             merged = df2
         else:
+            if "__niels_operator_id" in df2.columns:
+                df2 = df2.drop(columns=["__niels_operator_id"])
+            if "__niels_person_id" in df2.columns:
+                mapping = merged[[id_col, "__niels_person_id"]].merge(
+                    df2[[id_col, "__niels_person_id"]], on=id_col,
+                    suffixes=("_previous", "_current"), how="inner",
+                )
+                if not mapping["__niels_person_id_previous"].equals(mapping["__niels_person_id_current"]):
+                    raise ValueError("Person identities differ across feature periods")
+                df2 = df2.drop(columns=["__niels_person_id"])
             merged = pd.merge(
                 merged,
                 df2,
@@ -402,6 +435,7 @@ def build_merged_df(
         "operator": operator,
         "data_dir": str(data_dir),
         "id_col": id_col,
+        "identity_column": identity_col or id_col,
         "period_prefixes": period_prefixes,
         "column_prefixes": col_prefixes,
         "files": {k: str(v) for k, v in files_by_prefix.items()},
@@ -420,6 +454,7 @@ def _load_all_scenario_stats(
     all_scenario_name: str,
     id_col: str,
     column_prefixes: Optional[List[str]],
+    identity_col: Optional[str] = None,
 ) -> Dict[str, float]:
     """
     Load ALL scenario CSV(s) for one operator (1 row each — pre-aggregated operator stats).
@@ -435,7 +470,7 @@ def _load_all_scenario_stats(
         row = df.iloc[0]
         cp = col_prefixes[i]
         for col in df.columns:
-            if col == id_col:
+            if col in {id_col, identity_col, "__niels_person_id", "__niels_operator_id"}:
                 continue
             val = row[col]
             stats[f"{cp}_{col}"] = float(val) if pd.notna(val) else float("nan")
@@ -488,6 +523,7 @@ def build_all_operators_merged_df(
                 id_col=id_col, target_source_prefix="",
                 explicit_target_col=explicit_target_col,
                 column_prefixes=column_prefixes,
+                identity_col=(cfg.get("Niels_identity_column") or id_col) if identity_enabled(cfg) else None,
             )
             if base_test_prefixes:
                 df_test_base, meta_test = build_merged_df(
@@ -496,10 +532,13 @@ def build_all_operators_merged_df(
                     id_col=id_col, target_source_prefix="",
                     explicit_target_col=explicit_target_col,
                     column_prefixes=column_prefixes,
+                    identity_col=(cfg.get("Niels_identity_column") or id_col) if identity_enabled(cfg) else None,
                 )
             else:
                 df_test_base, meta_test = pd.DataFrame(), meta_valid
         except Exception as e:
+            if identity_enabled(cfg):
+                raise
             log(f"[ALL] Skipping operator {op}: base scenario load failed: {e}")
             continue
 
@@ -507,7 +546,8 @@ def build_all_operators_merged_df(
         # Leakage guard: validation stats applied to test set (not test stats)
         try:
             op_stats = _load_all_scenario_stats(
-                op_dir, validation_period_prefixes, all_scenario_name, id_col, column_prefixes
+                op_dir, validation_period_prefixes, all_scenario_name, id_col, column_prefixes,
+                identity_col=(cfg.get("Niels_identity_column") or id_col) if identity_enabled(cfg) else None,
             )
             for col, val in op_stats.items():
                 df_valid_base[col] = val
@@ -543,11 +583,13 @@ def build_all_operators_merged_df(
     return combined_valid, combined_test, meta_valid_combined, meta_test_combined
 
 
-def make_Xy(df: pd.DataFrame, id_col: str, target_col: str) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
+def make_Xy(df: pd.DataFrame, id_col: str, target_col: str, identity_col: Optional[str] = None) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
     seen = set()
     feature_cols = []
     for c in df.columns:
-        if (c not in {id_col, target_col}
+        if (c not in {id_col, target_col, identity_col, "__niels_person_id", "__niels_operator_id"}
+                and not (isinstance(c, str) and "__niels_" in c)
+                and not (identity_col and isinstance(c, str) and c.endswith("_" + identity_col))
                 and not (isinstance(c, str) and c.startswith("y_self_exclusion_"))
                 and c != "ACTIVE_FLAG"
                 and pd.api.types.is_numeric_dtype(df[c])
@@ -768,9 +810,90 @@ def _score_pipe(pipe, X_test):
         return pipe.predict(X_test)
 
 
+def aligned_person_groups(groups, X, y=None):
+    """Validate group alignment before any positional model split."""
+    if groups is None:
+        return None
+    if len(groups) != len(X) or (y is not None and len(y) != len(X)):
+        raise ValueError("Person groups must have one entry for every model row")
+    if isinstance(groups, pd.Series):
+        if not groups.index.equals(X.index):
+            raise ValueError("Person groups are not aligned with model row indexes")
+        result = groups.copy()
+    else:
+        result = pd.Series(groups, index=X.index)
+    if y is not None and isinstance(y, pd.Series) and not y.index.equals(X.index):
+        raise ValueError("Target indexes are not aligned with model rows")
+    normalized = result.astype("string").str.strip()
+    if (normalized.isna() | normalized.str.lower().isin({"", "nan", "none", "null", "<na>"})).any():
+        raise ValueError("Every model row requires a non-empty person group")
+    return normalized.astype(str)
+
+
+def person_cv_indices(X, y, groups, n_folds=5, random_state=42, test_size=0.2):
+    groups = aligned_person_groups(groups, X, y)
+    required = 2 if n_folds == 1 else n_folds
+    if groups.nunique() < required:
+        raise ValueError(f"Person validation requires at least {required} distinct persons; got {groups.nunique()}")
+    if n_folds == 1:
+        splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+    else:
+        splitter = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+    for train_idx, val_idx in splitter.split(X, y, groups):
+        if set(groups.iloc[train_idx]).intersection(groups.iloc[val_idx]):
+            raise ValueError("A person occurs in both training and validation")
+        yield train_idx, val_idx
+
+
+def fit_group_safe(pipe, X, y, groups=None):
+    """Prevent estimators from creating a hidden row-wise validation split."""
+    groups = aligned_person_groups(groups, X, y)
+    model = pipe.steps[-1][1]
+    if groups is not None:
+        if isinstance(model, CalibratedClassifierCV):
+            if any(name == "smote" for name, _ in pipe.steps[:-1]):
+                raise ValueError("Person-group calibration cannot be combined with SMOTE; use none or class_weight")
+            # Calibration is itself a validation operation and must share the
+            # same person boundary as the outer model evaluation.
+            model.set_params(cv=list(person_cv_indices(X, y, groups, n_folds=3)))
+        elif isinstance(model, (MLPClassifier, HistGradientBoostingClassifier, SGDClassifier)):
+            # These estimators cannot accept groups for their internal holdout.
+            # Train without that holdout rather than reintroducing identity overlap.
+            model.set_params(early_stopping=False)
+    pipe.fit(X, y)
+
+
+def validate_prebuilt_identity(payload, metadata, cfg, id_col=ID_COL_DEFAULT):
+    """Reject cached datasets built using another identity policy."""
+    enabled = identity_enabled(cfg)
+    stored = metadata.get("Niels_Identity_Confounding_switch", False)
+    if not isinstance(stored, bool) or stored != enabled:
+        raise ValueError("Pre-built dataset identity switch differs from this run; rebuild the dataset")
+    if not enabled:
+        return None
+    identity_col = cfg.get("Niels_identity_column") or id_col
+    if (metadata.get("identity_column") != identity_col
+            or metadata.get("identity_scope") != "operator_player"
+            or metadata.get("identity_split_random_state") != int(cfg.get("random_state", 23))):
+        raise ValueError("Pre-built dataset person key or split seed differs from this run; rebuild the dataset")
+    if "groups" not in payload:
+        raise ValueError("Pre-built dataset has no person groups; rebuild the dataset")
+    payload_meta = payload.get("identity_metadata", {})
+    manifest_keys = ("Niels_Identity_Confounding_switch", "identity_column",
+                     "identity_scope", "identity_split_random_state", "identity_dataset_id", "identity_holdout_applied")
+    if not metadata.get("identity_dataset_id") or any(payload_meta.get(k) != metadata.get(k) for k in manifest_keys):
+        raise ValueError("Pre-built dataset identity metadata differs from its manifest; rebuild the dataset")
+    X, y = payload["X"], payload["y"]
+    forbidden = {id_col, identity_col, "__niels_person_id", "__niels_operator_id"}
+    if any(c in forbidden or (isinstance(c, str) and ("__niels_" in c or c.endswith("_" + identity_col))) for c in X.columns):
+        raise ValueError("Pre-built dataset includes person identifiers as model features; rebuild the dataset")
+    return aligned_person_groups(payload["groups"], X, y)
+
+
 def fit_and_eval(
     pipe, X_train, y_train, X_test, y_test,
     model_name: str = "", early_stopping_cfg: Optional[Dict[str, Any]] = None,
+    groups=None,
 ) -> Tuple[float, float, float]:
     t0 = time.time()
 
@@ -782,13 +905,18 @@ def fit_and_eval(
     if needs_eval_set:
         # Split 15% from training data for early stopping eval_set
         fraction = early_stopping_cfg.get("validation_fraction", 0.15)
-        X_tr, X_ev, y_tr, y_ev = train_test_split(
-            X_train, y_train, test_size=fraction, random_state=42,
-            stratify=y_train if y_train.nunique() >= 2 else None,
-        )
+        if groups is not None:
+            train_idx, eval_idx = next(person_cv_indices(X_train, y_train, groups, n_folds=1, test_size=fraction))
+            X_tr, X_ev = X_train.iloc[train_idx], X_train.iloc[eval_idx]
+            y_tr, y_ev = y_train.iloc[train_idx], y_train.iloc[eval_idx]
+        else:
+            X_tr, X_ev, y_tr, y_ev = train_test_split(
+                X_train, y_train, test_size=fraction, random_state=42,
+                stratify=y_train if y_train.nunique() >= 2 else None,
+            )
         _fit_pipe_with_eval_set(pipe, X_tr, y_tr, X_ev, y_ev, model_name)
     else:
-        pipe.fit(X_train, y_train)
+        fit_group_safe(pipe, X_train, y_train, groups)
 
     fit_s = time.time() - t0
 
@@ -812,14 +940,40 @@ def cv_score(
     pipe, X, y, n_folds=5, random_state=42,
     model_name: str = "", early_stopping_cfg: Optional[Dict[str, Any]] = None,
     fitted_out: list = None,
+    groups=None,
 ) -> Tuple[float, float, float, float, float]:
-    """Stratified k-fold CV. Returns (mean_auprc, std_auprc, mean_auc, std_auc, total_fit_seconds).
-    When n_folds=1, does a single 80/20 stratified holdout split instead of k-fold.
-    If fitted_out is a list, the last fitted fold_pipe is appended to it (no extra fitting)."""
+    """Return (mean_auprc, std_auprc, mean_auc, std_auc, total_fit_seconds).
+
+    Supplied groups use StratifiedGroupKFold, or an 80/20 GroupShuffleSplit for
+    n_folds=1. Without groups, retain the original stratified row-wise splits.
+    fitted_out receives the last fitted fold pipeline without additional fitting.
+    """
     needs_eval_set = (
         early_stopping_cfg and early_stopping_cfg.get("enabled")
         and model_name in ("xgboost", "xgboost_focal", "lightgbm")
     )
+
+    if groups is not None:
+        groups = aligned_person_groups(groups, X, y)
+        aucs, auprcs = [], []
+        t0 = time.time()
+        last_fold_pipe = None
+        for train_idx, val_idx in person_cv_indices(X, y, groups, n_folds, random_state):
+            X_tr, X_val = X.iloc[train_idx], X.iloc[val_idx]
+            y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            fold_pipe = clone(pipe)
+            if needs_eval_set:
+                _fit_pipe_with_eval_set(fold_pipe, X_tr, y_tr, X_val, y_val, model_name)
+            else:
+                fit_group_safe(fold_pipe, X_tr, y_tr, groups.iloc[train_idx])
+            last_fold_pipe = fold_pipe
+            y_score = _score_pipe(fold_pipe, X_val)
+            aucs.append(safe_auc(y_val, y_score))
+            auprcs.append(safe_auprc(y_val, y_score))
+        if fitted_out is not None and last_fold_pipe is not None:
+            fitted_out.append(last_fold_pipe)
+        return (float(np.nanmean(auprcs)), float(np.nanstd(auprcs)),
+                float(np.nanmean(aucs)), float(np.nanstd(aucs)), time.time() - t0)
 
     if n_folds == 1:
         stratify = y if y.nunique() >= 2 else None
@@ -1060,18 +1214,23 @@ def main(argv=None) -> int:
     filter_active = int(os.environ.get("FILTER_ACTIVE", "1")) == 1
 
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+    use_identity = identity_enabled(cfg)
+    identity_col = (cfg.get("Niels_identity_column") or args.id_col) if use_identity else None
+    groups_train = groups_test = None
+    valid_only_cache = (use_identity and args.run_test is False and bool(cfg.get("dataset_path"))
+                        and (Path(cfg["dataset_path"]) / "valid_sampled.pkl").exists())
 
     data_dir = Path(cfg.get("data_dir", "")).expanduser()
     if not data_dir:
         raise SystemExit("config missing: data_dir")
 
     test_period_prefixes = cfg.get("test_period_prefixes", []) or []
-    if not test_period_prefixes:
+    if not test_period_prefixes and not valid_only_cache:
         raise SystemExit("config missing: test_period_prefixes")
 
     validation_period_prefixes = cfg.get("validation_period_prefixes", []) or []
     has_validation = bool(validation_period_prefixes)
-    if has_validation and len(validation_period_prefixes) != len(test_period_prefixes):
+    if has_validation and not valid_only_cache and len(validation_period_prefixes) != len(test_period_prefixes):
         raise SystemExit(
             f"validation_period_prefixes ({len(validation_period_prefixes)}) must have "
             f"same length as test_period_prefixes ({len(test_period_prefixes)})"
@@ -1150,7 +1309,8 @@ def main(argv=None) -> int:
     use_prebuilt = (
         dataset_path is not None
         and (dataset_path / "valid_sampled.pkl").exists()
-        and (dataset_path / "test_full.pkl").exists()
+        and ((dataset_path / "test_full.pkl").exists()
+             or (use_identity and args.run_test is False))
     )
 
     # --valid / --test flags: if neither given, default to both (backward compat)
@@ -1162,7 +1322,11 @@ def main(argv=None) -> int:
     log(f"[INFO] run_valid={run_valid} run_test={run_test}")
 
     try:
-        if has_validation:
+        if use_prebuilt:
+            # Cached data contains its own aligned identities and merge metadata.
+            # It must remain loadable when original CSVs are no longer present.
+            pass
+        elif has_validation:
             # --- Temporal validation/test split ---
             if all_mode:
                 log("[INFO] ALL mode: building combined all-operators validation and test DataFrames")
@@ -1185,6 +1349,7 @@ def main(argv=None) -> int:
                     target_source_prefix=target_source_prefix,
                     explicit_target_col=target_col,
                     column_prefixes=generic_col_prefixes,
+                    identity_col=identity_col,
                 )
                 df_test, merge_meta_test = build_merged_df(
                     operator=args.operator,
@@ -1194,6 +1359,7 @@ def main(argv=None) -> int:
                     target_source_prefix=target_source_prefix,
                     explicit_target_col=target_col,
                     column_prefixes=generic_col_prefixes,
+                    identity_col=identity_col,
                 )
             merge_meta = {
                 "validation": merge_meta_valid,
@@ -1210,9 +1376,12 @@ def main(argv=None) -> int:
                 id_col=args.id_col,
                 target_source_prefix=target_source_prefix,
                 explicit_target_col=target_col,
+                identity_col=identity_col,
             )
             merge_meta = merge_meta_single
     except Exception as e:
+        if use_identity:
+            raise
         log(f"[SKIP] merge failed: {e}")
         (out_dir / "meta_failed.json").write_text(json.dumps({
             "error": str(e),
@@ -1228,11 +1397,21 @@ def main(argv=None) -> int:
         log(f"[INFO] Loading pre-built dataset from {dataset_path}")
         with open(dataset_path / "valid_sampled.pkl", "rb") as _f:
             _dv = _pickle.load(_f)
-        with open(dataset_path / "test_full.pkl", "rb") as _f:
-            _dt = _pickle.load(_f)
+        if (dataset_path / "test_full.pkl").exists():
+            with open(dataset_path / "test_full.pkl", "rb") as _f:
+                _dt = _pickle.load(_f)
+        else:
+            _dt = None
         X_train, y_train = _dv["X"], _dv["y"]
-        X_test,  y_test  = _dt["X"], _dt["y"]
+        X_test, y_test = (_dt["X"], _dt["y"]) if _dt is not None else (X_train.iloc[:0], y_train.iloc[:0])
         _meta_ds = json.loads((dataset_path / "meta.json").read_text(encoding="utf-8"))
+        groups_train = validate_prebuilt_identity(_dv, _meta_ds, cfg, args.id_col)
+        groups_test = validate_prebuilt_identity(_dt, _meta_ds, cfg, args.id_col) if _dt is not None else None
+        if use_identity and _dt is not None:
+            if not _meta_ds.get("identity_holdout_applied"):
+                raise ValueError("Pre-built dataset has no person test holdout; rebuild the dataset")
+            if set(groups_train).intersection(groups_test):
+                raise ValueError("Pre-built training and test share persons; rebuild the dataset")
         feature_cols = _meta_ds["feature_cols"]
         positives = int(y_train.sum())
         total     = int(len(y_train))
@@ -1240,6 +1419,7 @@ def main(argv=None) -> int:
         pos_rate  = positives / max(total, 1)
         spw       = float(negatives / max(positives, 1))
         merge_meta = {"mode": "prebuilt_dataset", "dataset_path": str(dataset_path)}
+        merge_meta["identity_split"] = {k: v for k, v in _meta_ds.items() if k.startswith("identity_") or k == "Niels_Identity_Confounding_switch"}
         log(f"[INFO] pre-built valid: {total:,} rows, {positives:,} pos ({pos_rate:.4f}), {len(feature_cols)} features")
         log(f"[INFO] pre-built test:  {len(X_test):,} rows, {int(y_test.sum()):,} pos")
         has_validation = True
@@ -1259,8 +1439,12 @@ def main(argv=None) -> int:
             df_test = df_test[df_test["ACTIVE_FLAG"] != False]  # noqa: E712
             log(f"[ACTIVE] test:  {n_before - len(df_test)} inactieve rijen gefilterd ({len(df_test)} over)")
 
-        X_train, y_train, feature_cols = make_Xy(df_valid, id_col=args.id_col, target_col=tgt_valid)
-        X_test, y_test, _ = make_Xy(df_test, id_col=args.id_col, target_col=tgt_test)
+        df_valid, df_test, groups_train, groups_test, identity_meta = person_holdout(
+            df_valid, df_test, cfg, args.id_col, test_size=args.test_size, random_state=23,
+        )
+        merge_meta["identity_split"] = identity_meta
+        X_train, y_train, feature_cols = make_Xy(df_valid, id_col=args.id_col, target_col=tgt_valid, identity_col=identity_col)
+        X_test, y_test, _ = make_Xy(df_test, id_col=args.id_col, target_col=tgt_test, identity_col=identity_col)
 
         if args.round and DTYPE_MAPPING:
             apply = {c: t for c, t in DTYPE_MAPPING.items() if c in X_train.columns}
@@ -1287,7 +1471,8 @@ def main(argv=None) -> int:
             df = df[df["ACTIVE_FLAG"] != False]  # noqa: E712
             log(f"[ACTIVE] {n_before - len(df)} inactieve rijen gefilterd ({len(df)} over)")
 
-        X, y, feature_cols = make_Xy(df, id_col=args.id_col, target_col=tgt)
+        groups = identity_groups(df, args.id_col, cfg) if use_identity else None
+        X, y, feature_cols = make_Xy(df, id_col=args.id_col, target_col=tgt, identity_col=identity_col)
         positives = int(y.sum())
         total = int(len(y))
         negatives = total - positives
@@ -1298,9 +1483,16 @@ def main(argv=None) -> int:
         log(f"[INFO] n_features={len(feature_cols)}")
 
         stratify = y if (y.nunique() == 2 and positives >= 2 and negatives >= 2) else None
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=args.test_size, random_state=args.random_state, stratify=stratify
-        )
+        if use_identity:
+            train_idx, test_idx = next(person_cv_indices(X, y, groups, n_folds=1,
+                                                        random_state=int(cfg.get("random_state", 23)), test_size=args.test_size))
+            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+            groups_train, groups_test = groups.iloc[train_idx], groups.iloc[test_idx]
+        else:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=args.test_size, random_state=args.random_state, stratify=stratify
+            )
 
     preprocess_steps = build_preprocess_steps(rv)
     imbalance = (rv or {}).get("imbalance", {}) or {}
@@ -1321,7 +1513,8 @@ def main(argv=None) -> int:
     best = None  # (key, ..., params, pipe)
 
     if has_validation:
-        log(f"[INFO] Using {cv_folds}-fold stratified CV on validation set for HP selection")
+        cv_kind = "person-grouped" if use_identity else "stratified"
+        log(f"[INFO] Using {cv_folds}-fold {cv_kind} CV on validation set for HP selection")
 
     for i, raw_params in enumerate(param_list, start=1):
         if (time.time() - t0) >= time_budget:
@@ -1362,6 +1555,7 @@ def main(argv=None) -> int:
                 mean_pr, std_pr, mean_auc, std_auc, fit_s = cv_score(
                     pipe, X_train, y_train, n_folds=cv_folds, random_state=args.random_state,
                     model_name=args.model, early_stopping_cfg=early_stopping_cfg,
+                    groups=groups_train,
                 )
             except Exception as e:
                 log(f"[FAIL] trial={i} CV failed: {e}")
@@ -1390,6 +1584,7 @@ def main(argv=None) -> int:
                 auc, pr, fit_s = fit_and_eval(
                     pipe, X_train, y_train, X_test, y_test,
                     model_name=args.model, early_stopping_cfg=early_stopping_cfg,
+                    groups=groups_train,
                 )
             except Exception as e:
                 log(f"[FAIL] trial={i} fit/eval failed: {e}")
@@ -1434,6 +1629,9 @@ def main(argv=None) -> int:
         "cv_folds": cv_folds if has_validation else None,
         "mode": "temporal_cv" if has_validation else "legacy_random",
         "early_stopping": early_stopping_cfg if early_stopping_cfg.get("enabled") else None,
+        "Niels_Identity_Confounding_switch": use_identity,
+        "identity_column": identity_col or args.id_col,
+        "identity_scope": "operator_player" if use_identity else None,
     }
     (out_dir / "meta.json").write_text(json.dumps(meta_out, indent=2), encoding="utf-8")
 
@@ -1456,6 +1654,7 @@ def main(argv=None) -> int:
         test_auc, test_pr, refit_s = fit_and_eval(
             best_pipe, X_train, y_train, X_test, y_test,
             model_name=args.model, early_stopping_cfg=early_stopping_cfg,
+            groups=groups_train,
         )
         log(f"[TEST] AUC={test_auc:.6f} AUPRC={test_pr:.6f} refit_s={refit_s:.2f}")
 

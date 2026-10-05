@@ -14,6 +14,7 @@ Draaien:
 from __future__ import annotations
 
 import json
+import pickle
 import shutil
 import sys
 import tempfile
@@ -54,6 +55,15 @@ def test_run_full_pipeline_optuna_end_to_end():
         assert art["dataset_path"].joinpath("valid_sampled.pkl").exists()
         meta_ds = json.loads(art["dataset_path"].joinpath("meta.json").read_text(encoding="utf-8"))
         assert meta_ds["n_pos_valid"] > 0
+        assert meta_ds["Niels_Identity_Confounding_switch"] is True
+        assert meta_ds["identity_scope"] == "operator_player"
+        with art["dataset_path"].joinpath("valid_sampled.pkl").open("rb") as handle:
+            development = pickle.load(handle)
+        with art["dataset_path"].joinpath("test_full.pkl").open("rb") as handle:
+            test = pickle.load(handle)
+        assert set(development["groups"]).isdisjoint(test["groups"])
+        assert development["groups"].index.equals(development["X"].index)
+        assert all(json.loads(group)[0] == "Operator_a" for group in development["groups"])
 
         # Drie periodes → de feature-set bevat p0_/p1_/p2_ kolommen.
         fc = meta_ds["feature_cols"]
@@ -63,6 +73,8 @@ def test_run_full_pipeline_optuna_end_to_end():
         # Model + rapportage (optuna-output)
         model_dir = art["model_out_dir"]
         assert model_dir.joinpath("optuna_meta.json").exists()
+        model_meta = json.loads(model_dir.joinpath("optuna_meta.json").read_text(encoding="utf-8"))
+        assert model_meta["Niels_Identity_Confounding_switch"] is True
         assert model_dir.joinpath("optuna_results.csv").exists()
         # validate_best → cv5 + test op (aparte) periode
         assert model_dir.joinpath("optuna_cv5_results.csv").exists()

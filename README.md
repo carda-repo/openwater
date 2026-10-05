@@ -105,6 +105,7 @@ artefacten = run_full_pipeline(
     #   x_tijdspad="01062025:30062025", y_tijdspad="01072025:31072025",
     #   x_test_tijdspad="01072025:31072025", y_test_tijdspad="01082025:31082025",
     search="optuna", sampling_ratio=20, optuna_time_budget=14400, optuna_validate_best=True,
+    Niels_Identity_Confounding_switch=True,  # default: split by (operator, player ID)
     # ignore_EOD_Balance=True,   # if your data has no Player_Profile_EOD_Balance
     # operator_folds=5, independent_searches=True,   # operator-level CV (test not needed then)
 )
@@ -833,6 +834,7 @@ artefacten = run_full_pipeline(
     #   x_tijdspad="01062025:30062025", y_tijdspad="01072025:31072025",
     #   x_test_tijdspad="01072025:31072025", y_test_tijdspad="01082025:31082025",
     search="optuna", sampling_ratio=20, optuna_time_budget=14400, optuna_validate_best=True,
+    Niels_Identity_Confounding_switch=True,  # standaard: splits op (aanbieder, speler-ID)
     # ignore_EOD_Balance=True,   # als je data geen Player_Profile_EOD_Balance heeft
     # operator_folds=5, independent_searches=True,   # operator-niveau CV (test dan niet nodig)
 )
