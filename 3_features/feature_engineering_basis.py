@@ -768,7 +768,7 @@ def var3c_percentage_actieve_dagen_in_periode(
 # var4c: STAKE (SUCCESSFUL)
 # var4d: WINNING (SUCCESSFUL)
 # var4e: OTHER (SUCCESSFUL)
-# var4f: Transaction_Status = BONUS
+# var4f: BONUS (SUCCESSFUL)
 # → anchor: var4a retourneert alle 6 kolommen; var4b-var4f zijn no-ops
 # ============================================================================
 
@@ -789,7 +789,7 @@ def var4a_tot_var4f(
     - var4c: aantal STAKE (SUCCESSFUL)
     - var4d: aantal WINNING (SUCCESSFUL)
     - var4e: aantal OTHER (SUCCESSFUL)
-    - var4f: aantal transacties met Transaction_Status = BONUS
+    - var4f: aantal BONUS (SUCCESSFUL)
 
     Output: DataFrame met alle 6 kolommen + Player_Profile_ID
     """
@@ -836,7 +836,7 @@ def var4a_tot_var4f(
 
         # Vectorized: tellingen per (speler, type) voor SUCCESSFUL transacties
         type_mapping = {"DEPOSIT": "4a", "WITHDRAWAL": "4b", "STAKE": "4c",
-                        "WINNING": "4d", "OTHER": "4e"}
+                        "WINNING": "4d", "OTHER": "4e", "BONUS": "4f"}
         successful = df[df["Transaction_Status"] == "SUCCESSFUL"]
         if not successful.empty:
             chunk_type_counts = successful.groupby(
@@ -847,15 +847,6 @@ def var4a_tot_var4f(
                 if pid not in counts:
                     counts[pid] = {"4a": 0, "4b": 0, "4c": 0, "4d": 0, "4e": 0, "4f": 0}
                 counts[pid][type_mapping[tx_type]] += int(count)
-
-        # Bonus: filter op Transaction_Status = BONUS
-        bonus = df[df["Transaction_Status"] == "BONUS"]
-        if not bonus.empty:
-            chunk_bonus = bonus.groupby("Player_Profile_ID").size()
-            for pid, count in chunk_bonus.items():
-                if pid not in counts:
-                    counts[pid] = {"4a": 0, "4b": 0, "4c": 0, "4d": 0, "4e": 0, "4f": 0}
-                counts[pid]["4f"] += int(count)
 
     records = [
         {

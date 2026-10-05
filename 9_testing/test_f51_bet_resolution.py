@@ -82,25 +82,30 @@ def test_overlapping_bets_use_first_settlement_across_update_files_and_own_prize
     assert _values({BET: [recent, history], REF: [refs], TX: [transactions]}, chunksize)["P1"] == 600
 
 
-@pytest.mark.parametrize("status", ["BET_PLACED", "BET_UPDATED", "BET_CANCELLED", "BET_WON", "OTHER"])
-def test_open_updated_or_cancelled_without_refund_is_not_a_loss(tmp_path, status):
+@pytest.mark.parametrize("status", ["BET_PLACED", "BET_UPDATED", "BET_CANCELLED", "OTHER",
+                                    "BET_LOST", "BET_WON", "LOST", "WON", "SETTLED",
+                                    "RESOLVED", "CLOSED", "VOID"])
+def test_nonsettled_or_undocumented_status_without_refund_is_not_a_loss(tmp_path, status):
     tables = _tables(tmp_path, bets=[_bet("A", "first", status=status),
                                     _bet("C", "next", "21:10", "21:10", "BET_PLACED")])
     assert pd.isna(_values(tables)["P1"])
 
 
-def test_explicit_lost_status_in_relational_export_is_supported(tmp_path):
-    tables = _tables(tmp_path, bets=[_bet("A", "first", status="BET_LOST"),
+@pytest.mark.parametrize("status", ["BET_SETTLED", " bet_settled "])
+def test_documented_settled_status_without_prize_establishes_loss(tmp_path, status):
+    tables = _tables(tmp_path, bets=[_bet("A", "first", status=status),
                                     _bet("C", "next", "21:10", "21:10", "BET_PLACED")])
     assert _values(tables)["P1"] == 600
 
 
-def test_explicit_won_status_with_missing_prize_does_not_become_a_void_loss(tmp_path):
-    tables = _tables(tmp_path, bets=[_bet("A", "first", status="BET_WON"),
+@pytest.mark.parametrize("status", ["BET_CANCELLED", "OTHER", "BET_WON"])
+def test_void_refund_closes_interval_independently_of_status(tmp_path, status):
+    tables = _tables(tmp_path, bets=[_bet("A", "first", status=status),
                                     _bet("C", "next", "21:10", "21:10", "BET_PLACED")],
                      refs=[_ref("A", "stake-A"), _ref("A", "refund"), _ref("C", "stake-C")],
                      transactions=[_tx("stake-A"), _tx("refund", "20:55", "VOID_BET", 10), _tx("stake-C", "21:10")])
-    assert pd.isna(_values(tables)["P1"])
+    # Successful VOID_BET is evidence of closure; the status label adds no outcome.
+    assert _values(tables)["P1"] == 900
 
 
 @pytest.mark.parametrize("failed_tx", ["stake-A", "stake-C"])

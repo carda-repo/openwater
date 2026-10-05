@@ -79,8 +79,8 @@ def build_bet_players_map(bet_tx_paths, chunksize: int = 200_000) -> Dict[object
 
     ``WOK_Bet`` zelf heeft geen speler-kolom; de attributie van een bet aan zijn speler(s) loopt via
     ``wok_bet_pk_id`` → ``WOK_Bet.pk_id``. Deze map levert alleen die speler-koppeling (geen tijd):
-    f46 leest de afwikkeltijd uit ``WOK_Bet.Extraction_Date`` zelf (de eindstatus-rij) — exact de
-    fallback van de originele root-code, niet uit de transactie-tabel en zonder ``created_at``.
+    f46 gebruikt ``WOK_Bet.Extraction_Date`` van een afgewikkelde/geannuleerde rapportage
+    als benadering van de afwikkeltijd, zonder ``created_at`` of transactietijden te gebruiken.
     """
     players: Dict[object, set] = defaultdict(set)
     if not bet_tx_paths:
@@ -141,7 +141,7 @@ def build_limits_events_map(
     en is — net als in de root — de **primaire** bron voor f22/f23 (kind="participation"). ``value``
     is numeriek voor participation (``participation_amount``), deposit (``deposit_amount``), login
     (``login_duration``) en balance (``balance_amount``) → die tellen mee als increase/decrease.
-    ``game_type`` is een enum-string zonder bedrag → geen increase/decrease (wordt bij de numerieke
+    ``game_type`` is vrije tekst zonder bedrag → geen increase/decrease (wordt bij de numerieke
     vergelijking overgeslagen). Net als in het origineel krijgt **balance window=None** (alle
     balance-events vormen één stream per speler).
     """

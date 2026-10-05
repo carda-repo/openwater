@@ -175,7 +175,7 @@ def test_cashout_identity_includes_player_and_void_status_survives_update_versio
         TX: _write(tmp_path, TX, [_tx("same-id", "19", 10, "CASH_OUT"),
                                 _tx("same-id", "19", 100, "VOID_BET", player="P2")]),
         "WOK_Bet": _write(tmp_path, "WOK_Bet", [
-            _bet("B1", "one"), _bet("old", "two"), _bet("new", "two", "CANCELLED")]),
+            _bet("B1", "one"), _bet("old", "two"), _bet("new", "two", "BET_CANCELLED")]),
         "WOK_Bet_Transaction": _write(tmp_path, "WOK_Bet_Transaction", [
             _bet_ref("B1", "same-id"), _bet_ref("old", "same-id", "P2"),
             _bet_ref("new", "stake", "P2")]),
@@ -185,7 +185,7 @@ def test_cashout_identity_includes_player_and_void_status_survives_update_versio
     assert pd.isna(_values(result, CASHOUT)["P2"])
 
 
-@pytest.mark.parametrize("status", ["BET_CANCELLED", "CANCELLED", "VOID"])
+@pytest.mark.parametrize("status", ["BET_CANCELLED", " bet_cancelled "])
 def test_cancelled_update_without_new_player_reference_still_excludes_bet(tmp_path, status):
     tables = {
         "WOK_Bet": _write(tmp_path, "WOK_Bet", [_bet("old", "B1", "BET_PLACED"),
@@ -194,6 +194,18 @@ def test_cancelled_update_without_new_player_reference_still_excludes_bet(tmp_pa
     }
     result = fes.f48_percentage_bets_with_cashout(tables, chunksize=1)
     assert pd.isna(_values(result, CASHOUT)["P1"])
+
+
+@pytest.mark.parametrize("status", ["CANCELLED", "CANCELED", "VOID", "VOIDED",
+                                    "BET_CANCELED", "BET_VOID", "BET_VOIDED"])
+def test_undocumented_status_does_not_establish_cancellation(tmp_path, status):
+    tables = {
+        TX: _write(tmp_path, TX, [_tx("cash", "10", 10, "CASH_OUT")]),
+        "WOK_Bet": _write(tmp_path, "WOK_Bet", [_bet("B1", "cashout-bet", status)]),
+        "WOK_Bet_Transaction": _write(tmp_path, "WOK_Bet_Transaction", [_bet_ref("B1", "cash")]),
+    }
+    result = fes.f48_percentage_bets_with_cashout(tables, chunksize=1)
+    assert _values(result, CASHOUT)["P1"] == 1
 
 
 @pytest.mark.parametrize("kind,status,expected", [

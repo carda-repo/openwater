@@ -53,10 +53,10 @@ def median_loss_to_next_bet(tables, *, x_tijdspad=None, chunksize=200_000, verbo
     do not determine historical losses. Successful positive winnings or cash-outs
     exclude their own bet, irrespective of other bets placed in the meantime.
 
-    Regular losses require a settled final observed status and a successful stake.
+    Regular losses require final observed status BET_SETTLED and a successful stake.
     The first settled Extraction_Date is a proxy, not an exact resolution timestamp.
     VOID_BET is included by project choice: its successful positive refund closes
-    the interval at Transaction_Datetime, even when the status is CANCELLED.
+    the interval at Transaction_Datetime, independently of the reported bet status.
     No missing timestamp is replaced with the original placement time.
 
     RAM scales with references and player/bet pairs; event rows are not buffered.
@@ -68,9 +68,9 @@ def median_loss_to_next_bet(tables, *, x_tijdspad=None, chunksize=200_000, verbo
         return empty
     start = pd.to_datetime(x_tijdspad[0], format="%d%m%Y") if x_tijdspad else None
     end = pd.to_datetime(x_tijdspad[1], format="%d%m%Y") if x_tijdspad else None
-    # CDB uses SETTLED; the relational sample also has explicit LOST/WON statuses.
-    # WON never proves a no-prize loss, even if its payout reference is missing.
-    settled_statuses = {"SETTLED", "LOST"}
+    # KSA CDB v1.11 p.57: only BET_SETTLED establishes settlement.
+    # Whether a settled bet lost is determined from its own transactions.
+    settled_statuses = {"BET_SETTLED"}
     parents = {}
     bets = {}
 
@@ -97,7 +97,6 @@ def median_loss_to_next_bet(tables, *, x_tijdspad=None, chunksize=200_000, verbo
             # A future version may supply a parent link/placement, never a past outcome.
             if pd.isna(extraction) or (end is not None and extraction >= end):
                 continue
-            status = status.removeprefix("BET_")
             if bet.latest_status_at is None or extraction >= bet.latest_status_at:
                 bet.latest_status, bet.latest_status_at = status, extraction
             if status in settled_statuses:
@@ -188,7 +187,7 @@ def median_loss_to_next_bet(tables, *, x_tijdspad=None, chunksize=200_000, verbo
     for (identity, pid), outcome in outcomes.items():
         bet = bets[identity]
         if (not outcome.stake or outcome.prize or outcome.cashout or outcome.unknown
-                or bet.placed is None or bet.latest_status == "WON"):
+                or bet.placed is None):
             continue
         if outcome.void_at is not None:
             closed = outcome.void_at

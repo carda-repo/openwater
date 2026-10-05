@@ -6079,14 +6079,15 @@ def f46_median_seconds_bet_placed_to_resolved(
     during the specified period. Positive real number. N/A if no bets are placed.
 
     Practical implementation for CDB/WOK (organisatie-relationeel):
-    - Source: WOK_Bet (één rij per bet, met de eindstatus in Bet_Status).
+    - Source: WOK_Bet reports, linked to players through WOK_Bet_Transaction.
     - placed_ts   = Bet_Start_Datetime
-    - resolved_ts = WOK_Bet.Extraction_Date van diezelfde rij, mits de status afgewikkeld is
-        (SETTLED/RESOLVED/CLOSED/CANCELLED/VOID/WON/LOST); BET_PLACED = open → geen resolved-tijd.
-        Dit is 1-op-1 de originele root-berekening: die kende geen Bet_Resolved_Datetime-kolom in dit
-        formaat en viel terug op Extraction_Date. created_at wordt NIET gebruikt (net als in de root).
+    - resolved_ts = WOK_Bet.Extraction_Date of a BET_SETTLED or BET_CANCELLED report.
+      These are the completed statuses in KSA CDB v1.11, p. 57. Cancellation remains
+      included by the existing feature rule. BET_PLACED, BET_UPDATED and OTHER do
+      not establish completion. Status matching is exact, after case/space normalization.
+    - Extraction_Date is a reporting-time proxy, not an exact settlement timestamp.
     - Player_Profile_ID komt uit WOK_Bet_Transaction (WOK_Bet heeft geen speler-kolom), join op pk_id.
-    - Filters on event timestamps in [start, end) (no +1 day logic).
+    - Placement is filtered to [start, end); the extraction-time proxy is not window-filtered.
     """
     if log_path:
         logger = _setup_feature_logger(log_path, "f46_median_seconds_bet_placed_to_resolved")
@@ -6108,16 +6109,13 @@ def f46_median_seconds_bet_placed_to_resolved(
     if not bet_paths:
         return pd.DataFrame(columns=["Player_Profile_ID", "f46_median_seconds_bet_placed_to_resolved"])
 
-    # organisatie-relationeel: WOK_Bet is één rij per bet met de EINDSTATUS (BET_PLACED/WON/LOST/CANCELLED/
-    # SETTLED). De afwikkeltijd staat op die rij zélf — Extraction_Date — exact de fallback die de
-    # originele root-code gebruikte toen er geen Bet_Resolved_Datetime-kolom was. created_at gebruiken
-    # we NIET (deed de root ook niet). placed = Bet_Start_Datetime. De speler komt uit
-    # WOK_Bet_Transaction (WOK_Bet heeft geen speler-kolom), join op pk_id → wok_bet_pk_id.
+    # Relational export: attribute each report through pk_id -> wok_bet_pk_id.
+    # The report's Extraction_Date approximates completion time; it does not
+    # prove when the bet was actually settled or cancelled.
     _players_by_bet = build_bet_players_map(tables.get("WOK_Bet_Transaction"), chunksize=chunksize)
 
-    # "resolved"-statussen: zelfde set als de root (SETTLED/RESOLVED/CLOSED/CANCELLED/VOID/WON/LOST).
-    # BET_PLACED = open → nog geen resolved-tijd. Substring-match dekt de organisatie-prefix (BET_*).
-    resolved_keywords = ("SETTLED", "RESOLVED", "CLOSED", "CANCELLED", "VOID", "WON", "LOST")
+    # Only documented completed Bet_Status values (KSA CDB v1.11, p. 57).
+    resolved_statuses = {"BET_SETTLED", "BET_CANCELLED"}
 
     # collected deltas per player
     deltas_per_player: Dict[str, List[float]] = {}
@@ -6165,8 +6163,8 @@ def f46_median_seconds_bet_placed_to_resolved(
                 placed_any_bet[pid] = True
 
             status_raw = str(df.iat[i, idx_st]).upper().strip()
-            if not any(k in status_raw for k in resolved_keywords):
-                # bet nog niet afgewikkeld (BET_PLACED) → geen resolved-tijd
+            if status_raw not in resolved_statuses:
+                # Open, updated, OTHER or unsupported status: no completion time.
                 continue
 
             placed_ts_i = df.iat[i, idx_pts]
@@ -6355,7 +6353,7 @@ def f48_percentage_bets_with_cashout(
       transacties (WOK_Bet_Transaction.transactions_id) voorkomt in WOK_Player_Account_Transaction
       met Transaction_Type == "CASH_OUT" en Transaction_Status == "SUCCESSFUL".
 
-    - Geannuleerde betstatussen en bets met succesvolle VOID_BET tellen niet mee
+    - Bets met Bet_Status == BET_CANCELLED en bets met succesvolle VOID_BET tellen niet mee
       in teller of noemer. VOID_STAKE is een (gedeeltelijke) spelterugbetaling.
 
     Koppeling (relationeel): WOK_Bet_Transaction.transactions_id <-> WOK_Player_Account_Transaction.transaction_id
@@ -6463,8 +6461,7 @@ def f48_percentage_bets_with_cashout(
                     if pd.notna(txid):
                         txids.add(str(txid))
 
-            status = statuses.iloc[i].removeprefix("BET_")
-            cancelled = status in {"CANCELLED", "CANCELED", "VOID", "VOIDED"}
+            cancelled = statuses.iloc[i] == "BET_CANCELLED"
             if cancelled:
                 cancelled_bet_ids.add(bet_id)
             for pid, txids in transactions_per_player.items():
