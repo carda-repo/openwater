@@ -143,7 +143,7 @@ def run_full_pipeline(
     # ── Stap 3b operator-features (totaalalgoritme) ──────────────────────────
     do_operator_stats: bool = True,                # ALL-aggregaat (mean/std/min/max kernfeatures); zet False om uit te zetten
     add_ohe: bool = True,                           # 26-koloms a–z one-hot per operator (in merge); zet False om uit te zetten
-    ignore_EOD_Balance: bool = False,              # dataset zonder Player_Profile_EOD_Balance: f26/f27/f28 vallen terug i.p.v. crashen
+    ignore_EOD_Balance: bool = False,              # zonder Player_Profile_EOD_Balance blijven f26/f27/f28 onbekend
     # ── Stap 4 active-filter ─────────────────────────────────────────────────
     do_active_filter: bool = True,
     also_inactives: bool = False,                  # origineel --also-inactives: niet filteren op actieve spelers
@@ -476,7 +476,7 @@ def main(argv=None) -> int:
     p.add_argument("--no-ohe", dest="add_ohe", action="store_false", default=True,
                    help="Zet de 26-koloms a–z one-hot per operator uit.")
     p.add_argument("--ignore-eod-balance", dest="ignore_EOD_Balance", action="store_true", default=False,
-                   help="Dataset zonder Player_Profile_EOD_Balance: f26/f27/f28 vallen terug i.p.v. crashen.")
+                   help="Dataset zonder Player_Profile_EOD_Balance: f26/f27/f28 blijven onbekend i.p.v. crashen.")
     p.add_argument("--chunksize", type=int, default=400_000)
     p.add_argument("--verbose", action="store_true", default=False)
     args = p.parse_args(argv)

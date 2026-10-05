@@ -184,7 +184,7 @@ your data has, it makes the right monthly buckets automatically.
 
 **Two flags for deviating data:**
 - `--ignore-eod-balance` — if your `WOK_Player_Profile` has no `player_profile_eod_balance` column
-  (features f26/f27/f28 then fall back instead of crashing).
+  (features f26/f27/f28 then remain missing instead of assuming an opening balance of zero).
 - `--also-inactives` — if the active filter filters everyone out (no status record before the cutoff
   in your data); then you skip the active filter.
 
@@ -205,6 +205,50 @@ poetry run python run_pipeline.py --help
   `5_descriptive\run_descriptive.py` resp. `_logging\run_with_log.py` (see `README.md`).
 - **Data-driven monthly bucketing**: the sorting picks buckets based on the actual date range of
   your data — no fixed window, no data loss.
+- **Dutch play times**: clock hours, weekdays and transaction activity dates use
+  `Europe/Amsterdam`, including summer/winter time. This applies to F41–F45, active-day
+  counts, calendar-day spans, streaks and daily/weekly aggregates, including the basis
+  features for night/weekend activity. Conversion runs per chunk without extra file scans.
+  Source timestamps, analysis-window boundaries, balance snapshots and elapsed durations
+  remain UTC; profile `Extraction_Date` reporting-day counts retain their UTC definition.
+- **F16 financial activation**: uses the first successful stake, deposit or withdrawal in the
+  available history and the last such transaction in the feature period. Supply transaction
+  history from before that period to recover the actual activation date. The period includes
+  the entire UTC end date; Dutch calendar-day differences have a minimum of 1 and no upper limit.
+- **F26–F28 opening balances**: use the latest snapshot at/before the feature-window start,
+  or reconstruct from the earliest later snapshot within that window. Older snapshots are
+  advanced using the intervening transactions. The reconstruction is shared across the three
+  features and needs at most one extra chunked transaction scan, with state per player.
+  It requires complete, deduplicated movements between the snapshot and the start; the
+  snapshot timestamp is `Extraction_Date`, and transactions at that timestamp follow it.
+  Without a usable snapshot the features stay missing, including in the output CSV.
+- **Equal timestamps (F25/F26–F28/F51)**: F26–F28 apply all successful movements of a
+  player at the same UTC timestamp together. Drops compare the balance before and after
+  that moment; deposits at that moment do not count as subsequent deposits. F27 counts
+  each deposit at a later eligible moment, F28 measures until that moment once. Transactions
+  must be chronological per player across files; backward timestamps make that player's
+  balance features unknown. Processing retains one unfinished group per player, rather than
+  full transaction histories. F25 chooses the latest in-window extraction per modification
+  time and retains one record per distinct modification. Conflicting statuses at that
+  extraction leave F25 unknown. Conflicting balances at the selected snapshot leave the
+  opening balance unknown. Conflicting final bet statuses at the latest extraction leave
+  ordinary F51 losses unknown; a newer status can resolve that conflict. VOID_BET refund
+  evidence remains independent. These rules also apply across chunk and file boundaries.
+- **Void rules for F44/F45/F48/F51**: F44/F45 use stakes net of successful
+  `VOID_BET`/`VOID_STAKE` refunds, allocated proportionally to the linked bet/session's
+  original stakes and placement hours. Refunds after the exclusive window end are ignored.
+  Their chunked calculation is shared per window; reference maps and aggregate sums remain
+  in memory. Missing refund links or zero net stakes produce missing shares. F48 excludes
+  cancelled bets and bets with successful `VOID_BET` from both counts. F51 combines bet
+  updates by operator/Bet_ID and measures from settlement to the next bet with a successful
+  stake. Only settled bets without their own positive winnings/cash-outs qualify as losses;
+  the first settled `Extraction_Date` approximates resolution time. `VOID_BET` also qualifies
+  by project choice, using the refund timestamp. Both closure and next placement must be in
+  the feature window; earlier transaction history is used for outcomes. The linked history
+  must be complete to establish that no prize was paid. F51 scans each of
+  its three tables once and retains reference indexes and per-bet state, not event rows.
+  Historical settled reports are needed: a later final export alone cannot recover earlier
+  resolution times. Undefined results stay missing in the output CSV.
 
 ---
 
@@ -433,7 +477,7 @@ ook heeft, hij maakt automatisch de juiste maand-buckets.
 
 **Twee vlaggen voor afwijkende data:**
 - `--ignore-eod-balance` — als je `WOK_Player_Profile` géén `player_profile_eod_balance`-kolom
-  heeft (features f26/f27/f28 vallen dan terug i.p.v. te crashen).
+  heeft (features f26/f27/f28 blijven dan onbekend; er wordt geen beginsaldo van nul aangenomen).
 - `--also-inactives` — als de active-filter iedereen wegfiltert (geen statusrecord vóór de
   cutoff in je data); dan sla je het actief-filter over.
 
@@ -455,6 +499,54 @@ poetry run python run_pipeline.py --help
   `5_descriptive\run_descriptive.py` resp. `_logging\run_with_log.py` (zie `README.md`).
 - **Datagedreven maand-bucketing**: de sortering kiest de buckets op basis van het werkelijke
   datumbereik van je data — geen vast venster, geen dataverlies.
+- **Nederlandse speeltijden**: uren, weekdagen en transactiedagen gebruiken
+  `Europe/Amsterdam`, inclusief zomer- en wintertijd. Dit geldt voor F41–F45, actieve dagen,
+  kalenderdagverschillen, speelreeksen en dag-/weekaggregaties, waaronder de basisfeatures
+  voor nacht- en weekendactiviteit. De omzetting gebeurt per chunk zonder extra bestandsdoorlopen.
+  Brontijdstippen, analysevenstergrenzen, saldomomenten en verstreken tijd blijven UTC;
+  rapportagedagen op basis van profiel-`Extraction_Date` behouden hun UTC-definitie.
+- **F16 financiële activatie**: gebruikt de eerste succesvolle inzet, storting of opname in de
+  beschikbare historie en de laatste daarvan binnen het featurevenster. Lever ook eerdere
+  transactiehistorie aan om de echte activatiedatum te kunnen bepalen. De volledige UTC-einddatum
+  telt mee; Nederlandse kalenderdagverschillen hebben een minimum van 1 en geen bovengrens.
+- **Beginsaldi voor F26–F28**: gebruiken het laatste saldomoment op/vóór de start van het
+  featurevenster, of rekenen terug vanaf het eerste latere saldomoment binnen dat venster.
+  Bij oudere saldi worden ook de tussenliggende transacties verwerkt. De reconstructie wordt
+  gedeeld door de drie features en kost hooguit één extra chunkgewijze transactiedoorloop,
+  met gegevens per speler in het geheugen. Alle mutaties tussen het saldomoment en de start
+  moeten volledig en gededupliceerd zijn. Het saldotijdstip is `Extraction_Date`; transacties
+  exact op dat tijdstip volgen op het saldo. Zonder bruikbaar saldo blijven de features
+  onbekend, ook in het uiteindelijke CSV-bestand.
+- **Gelijke tijdstippen (F25/F26–F28/F51)**: F26–F28 verwerken alle succesvolle mutaties
+  van een speler op hetzelfde UTC-tijdstip samen. Een daling wordt bepaald tussen het saldo
+  vóór en ná dat moment; stortingen op dat moment gelden niet als latere stortingen. F27
+  telt iedere storting op een later geschikt moment, F28 meet één interval tot dat moment.
+  Transacties moeten per speler chronologisch staan, ook over bestanden heen. Een tijdstip
+  dat terugloopt maakt diens saldofeatures onbekend. Alleen de onafgeronde groep per speler
+  blijft in het geheugen, zonder volledige transactiehistorie. F25 kiest per wijzigingstijd
+  de nieuwste extractie binnen het venster en bewaart één record per unieke wijzigingstijd.
+  Tegenstrijdige statussen op die extractietijd maken F25 onbekend. Tegenstrijdige saldi op
+  het gekozen saldomoment maken het beginsaldo onbekend. Tegenstrijdige laatste betstatussen
+  op dezelfde extractietijd maken gewone F51-verliezen onbekend; een nieuwere status kan
+  dat oplossen. Een VOID_BET-terugbetaling blijft onafhankelijk bewijs. Deze regels gelden
+  ook over chunk- en bestandsgrenzen.
+- **Voidregels voor F44/F45/F48/F51**: F44/F45 verrekenen succesvolle
+  `VOID_BET`/`VOID_STAKE` naar verhouding met de oorspronkelijke inzetten van de gekoppelde
+  weddenschap/spelsessie en hun inzettijdstippen. Terugbetalingen na de exclusieve einddatum
+  tellen niet mee. De chunkgewijze berekening wordt per venster gedeeld; koppelingsindexen en
+  sommen blijven in het geheugen. Ontbrekende terugbetalingskoppelingen of netto-inzet nul
+  geven een onbekend aandeel. F48 sluit geannuleerde bets en bets met succesvolle `VOID_BET`
+  uit van teller en noemer. F51 combineert betupdates op aanbieder/Bet_ID en meet vanaf
+  afwikkeling tot de volgende bet met een succesvolle inzet. Alleen afgewikkelde bets zonder
+  eigen positieve prijzen/cash-outs tellen als verlies; de eerste afgewikkelde extractie
+  benadert het afwikkelmoment. `VOID_BET` telt volgens onze keuze ook mee, vanaf de
+  terugbetaling. Afwikkeling en volgende plaatsing moeten binnen het featurevenster vallen;
+  eerdere transacties bepalen mede de uitkomst. De gekoppelde historie moet volledig zijn
+  om vast te stellen dat geen prijs is betaald. F51 leest elk van zijn drie tabellen één
+  keer en bewaart koppelingsindexen en gegevens per bet, zonder transactiegebeurtenissen
+  te bufferen. Historische afgewikkelde rapportages zijn nodig: alleen een latere eindexport
+  levert de eerdere afwikkeltijden niet. Niet-berekenbare uitkomsten blijven onbekend in het
+  uiteindelijke CSV-bestand.
 
 ---
 

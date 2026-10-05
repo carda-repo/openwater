@@ -419,7 +419,7 @@ def iter_limit_values(json_obj, *, type_: str):
         # Limit_Game_Type is een lijst/dict met o.a. request/start datetime en een game-type limit.
         # Time window kan ontbreken; laat None als het er niet is.
         ts_keys = ["Game_Type_Request_Datetime", "Game_Type_Start_Datetime"]
-        val_key = "Game_Type"  # vaak een string/enum of lijst; we geven het terug zoals gevonden
+        val_key = "Game_Type_Type"  # stringMedium: vrije tekst, geen enum
         win_key = "Game_Type_Time_Window"  # indien aanwezig
     else:
         raise ValueError(f"Onbekend limit-type: {type_}")
